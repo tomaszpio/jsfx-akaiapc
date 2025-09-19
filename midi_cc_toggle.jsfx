@@ -1,11 +1,11 @@
-desc:Note On Toggler — 2×64 Notes, Omni + Scalable UI (+ optional Note Off toggle)
+desc:Note On Toggler - 2x64 Notes, Omni + Scalable UI (+ memory preview)
 
 // -------------------------
 // Sliders
 // -------------------------
 slider1:0<0,16,1{Omni,Channel 1,Channel 2,Channel 3,Channel 4,Channel 5,Channel 6,Channel 7,Channel 8,Channel 9,Channel 10,Channel 11,Channel 12,Channel 13,Channel 14,Channel 15,Channel 16}>MIDI Channel
 slider2:1<1,3,1{Dark Gray,Gray,Black}>Color Scheme
-slider3:0<0,1,1{Notes 0–63,Notes 64–127}>Page
+slider3:0<0,1,1{Notes 0-63,Notes 64-127}>Page
 slider4:0<0,1,1{Off,On}>Toggle on Note Off
 
 // -------------------------
@@ -13,9 +13,9 @@ slider4:0<0,1,1{Off,On}>Toggle on Note Off
 // -------------------------
 @init
 NOTES_PER_PAGE = 64;
-TOTAL_NOTES = 128;
+TOTAL_NOTES    = 128;
 
-channel        = slider1 - 1; // -1 = Omni; 0..15 = channels 1..16
+channel        = slider1 - 1; // -1 = Omni; 0..15 = ch 1..16
 color_mode     = slider2;
 page           = slider3;
 toggle_noteoff = slider4;
@@ -25,7 +25,7 @@ last_vel  = -1;
 last_ch   = -1;
 last_cmd  = -1;
 
-// state[]: pamięć stanów 0..127 (domyślnie 0)
+// state[]: pamięć 0..127 (0 = off, 1 = on)
 
 // -------------------------
 // @slider
@@ -37,31 +37,6 @@ page           = slider3;
 toggle_noteoff = slider4;
 
 // -------------------------
-// Helpers
-// -------------------------
-function in_range(n, lo, hi) (
-  n >= lo && n < hi;
-);
-
-function reacts_to_channel(ch) (
-  channel < 0 || ch == channel; // Omni lub dokładny kanał
-);
-
-function toggle_note_state(note) local(idx) (
-  idx = note & 0x7F; // 0..127
-  state[idx] = state[idx] ? 0 : 1;
-);
-
-function reset_all_states()
-(
-  i = 0;
-  loop(TOTAL_NOTES,
-    state[i] = 0;
-    i += 1;
-  );
-);
-
-// -------------------------
 // @block — MIDI logic
 // -------------------------
 @block
@@ -70,56 +45,55 @@ while ( midirecv(offset, msg1, msg23) ?
   status = msg1 & 0xF0;
   ch     = msg1 & 0x0F;
 
-  (status == 0x90 || status == 0x80 || status == 0xB0) ? (
-    data1 =  msg23       & 0x7F;
-    data2 = (msg23 >> 8) & 0x7F;
-  );
+  d1 =  msg23       & 0x7F;
+  d2 = (msg23 >> 8) & 0x7F;
 
-  // NOTE ON
-  status == 0x90 && reacts_to_channel(ch) ? (
-    note = data1;
-    vel  = data2;
+  reacts = (channel < 0) || (ch == channel);
+  base   = page ? 64 : 0;
+  high   = base + NOTES_PER_PAGE;
 
-    base = page ? 64 : 0;
-    high = base + NOTES_PER_PAGE;
+  // NOTE ON (vel > 0) — jedyne pewne źródło toggla
+  (status == 0x90) && reacts ? (
+    note = d1; vel = d2;
 
-    in_range(note, base, high) && vel > 0 ? (
-      toggle_note_state(note);
-      last_note = note;
-      last_vel  = vel;
-      last_ch   = ch;
-      last_cmd  = -1;
+    // jeśli vel==0 i włączony toggle_noteoff, traktuj jak NOTE OFF
+    (vel == 0 && toggle_noteoff) ? (
+      (note >= base && note < high) ? (
+        idxn = note & 0x7F;
+        state[idxn] = state[idxn] ? 0 : 1;
+        last_note = note; last_vel = 0; last_ch = ch; last_cmd = -1;
+      );
+    ) :
+    (vel > 0) ? (
+      (note >= base && note < high) ? (
+        idxn = note & 0x7F;
+        state[idxn] = state[idxn] ? 0 : 1;
+        last_note = note; last_vel = vel; last_ch = ch; last_cmd = -1;
+      );
     );
   );
 
-  // OPTIONAL: toggle także na NOTE OFF (jeśli włączone)
-  status == 0x80 && toggle_noteoff && reacts_to_channel(ch) ? (
-    note = data1;
-    vel  = data2;
-
-    base = page ? 64 : 0;
-    high = base + NOTES_PER_PAGE;
-
-    in_range(note, base, high) ? (
-      toggle_note_state(note);
-      last_note = note;
-      last_vel  = vel;
-      last_ch   = ch;
-      last_cmd  = -1;
+  // NOTE OFF (0x80) — opcjonalnie
+  (status == 0x80) && toggle_noteoff && reacts ? (
+    note = d1; vel = d2;
+    (note >= base && note < high) ? (
+      idxn = note & 0x7F;
+      state[idxn] = state[idxn] ? 0 : 1;
+      last_note = note; last_vel = vel; last_ch = ch; last_cmd = -1;
     );
   );
 
-  // CONTROL CHANGE — CC120/CC123 -> reset wszystkich stanów
-  status == 0xB0 && reacts_to_channel(ch) ? (
-    cc  = data1;
-    val = data2;
-
+  // CONTROL CHANGE — CC120/CC123 => reset wszystkich stanów
+  (status == 0xB0) && reacts ? (
+    cc = d1;
     (cc == 120 || cc == 123) ? (
-      reset_all_states();
+      i = 0;
+      loop(TOTAL_NOTES,
+        state[i] = 0;
+        i += 1;
+      );
       last_cmd  = cc;
-      last_note = -1;
-      last_vel  = -1;
-      last_ch   = ch;
+      last_note = -1; last_vel = -1; last_ch = ch;
     );
   );
 
@@ -129,30 +103,30 @@ while ( midirecv(offset, msg1, msg23) ?
 ) : 0 );
 
 // -------------------------
-// @gfx — scalable UI z poprawką statusu
+// @gfx — scalable UI + fixed header/status + memory preview
 // -------------------------
 @gfx
-// Tło wg schematu (opis==wartość)
+// Tło (opis == wartość)
 gfx_clear = color_mode == 1 ? 0x202020   // Dark Gray
          : color_mode == 2 ? 0x303030   // Gray
          :                    0x000000; // Black
 gfx_a = 1;
 
-// Ustawienia layoutu
+// Layout
 margin      = 10;
-pad_between = 4;   // odstęp między headerem, statusem i gridem
+pad_between = 4;   // odstępy między sekcjami
 bottompad   = margin;
 
 cols = 8;
 rows = 8;
 
-// Teksty nagłówka i statusu
 gfx_setfont(1, "", 14);
 
+// Header + status
 (channel < 0) ?
-  sprintf(#hdr, "Note Toggler — Channel: Omni — Page: %s", page ? "64–127" : "0–63")
+  sprintf(#hdr, "Note Toggler - Channel: Omni - Page: %s", page ? "64-127" : "0-63")
 :
-  sprintf(#hdr, "Note Toggler — Channel: %d — Page: %s", channel+1, page ? "64–127" : "0–63");
+  sprintf(#hdr, "Note Toggler - Channel: %d - Page: %s", channel+1, page ? "64-127" : "0-63");
 
 (last_note >= 0) ? (
   sprintf(#st, "Last: Note %d  Vel %d  Ch %d%s",
@@ -165,28 +139,46 @@ gfx_setfont(1, "", 14);
   sprintf(#st, "Waiting for MIDI...");
 );
 
-// Zmierz rozmiary i narysuj header oraz status
+// Zmierz i narysuj header + status
 gfx_measurestr(#hdr, hdr_w, hdr_h);
 gfx_measurestr(#st,  st_w,  st_h);
 
-// Header
 gfx_r = gfx_g = gfx_b = 1;
-gfx_x = margin;
-gfx_y = margin;
-gfx_drawstr(#hdr);
+gfx_x = margin; gfx_y = margin;                       gfx_drawstr(#hdr);
+gfx_x = margin; gfx_y = margin + hdr_h + pad_between; gfx_drawstr(#st);
 
-// Status POD headerem (nie nachodzi na grid)
-gfx_x = margin;
-gfx_y = margin + hdr_h + pad_between;
-gfx_drawstr(#st);
+// Krótki podgląd pamięci na BIEŻĄCEJ stronie (licznik + lista ID)
+base = page ? 64 : 0;
+active_count = 0;
+#active_list = "";
+i = 0;
+loop(NOTES_PER_PAGE,
+  idxn = base + i;
+  state[idxn] ? (
+    active_count += 1;
+    // do 24 indeksów do podglądu
+    strlen(#active_list) < 120 ? (
+      sprintf(#tmp, "%s%d ", #active_list, idxn);
+      strcpy(#active_list, #tmp);
+    );
+  );
+  i += 1;
+);
+sprintf(#memline, "Active on page: %d  [%s]", active_count, #active_list);
 
-// Oblicz obszar siatki poniżej statusu
-top_of_grid = margin + hdr_h + pad_between + st_h + pad_between;
+gfx_measurestr(#memline, mem_w, mem_h);
+gfx_x = margin; gfx_y = margin + hdr_h + pad_between + st_h + pad_between;
+gfx_drawstr(#memline);
+
+// GRID
+top_of_grid = margin + hdr_h + pad_between + st_h + pad_between + mem_h + pad_between;
 avail_w = max(1, gfx_w - 2*margin);
 avail_h = max(1, gfx_h - top_of_grid - bottompad);
 
 cell_w = floor(avail_w / cols);
 cell_h = floor(avail_h / rows);
+cell_h < 14 ? cell_h = 14;
+
 grid_w = cell_w * cols;
 grid_h = cell_h * rows;
 
@@ -194,8 +186,6 @@ grid_x0 = margin + floor((avail_w - grid_w) * 0.5);
 grid_y0 = top_of_grid;
 
 // Rysowanie gridu
-base = page ? 64 : 0;
-
 i = 0;
 loop(NOTES_PER_PAGE,
   row = floor(i / cols);
@@ -204,23 +194,23 @@ loop(NOTES_PER_PAGE,
   x = grid_x0 + col * cell_w;
   y = grid_y0 + row * cell_h;
 
-  idx_note = base + i;
-  on = state[idx_note] ? 1 : 0;
+  idxn = base + i;
+  on = state[idxn] ? 1 : 0;
 
-  // Delikatne tło komórki
+  // tło
   gfx_r = on ? 0.10 : 0.07;
   gfx_g = on ? 0.30 : 0.07;
   gfx_b = on ? 0.10 : 0.07;
   gfx_rect(x, y, cell_w-1, cell_h-1);
 
-  // Ramka
+  // ramka
   gfx_r = gfx_g = gfx_b = 0.6;
   gfx_line(x, y, x + cell_w - 1, y);
   gfx_line(x, y, x, y + cell_h - 1);
   gfx_line(x + cell_w - 1, y, x + cell_w - 1, y + cell_h - 1);
   gfx_line(x, y + cell_h - 1, x + cell_w - 1, y + cell_h - 1);
 
-  // Tekst w komórce
+  // etykieta
   gfx_r = on ? 0.2 : 0.8;
   gfx_g = on ? 1.0 : 0.8;
   gfx_b = on ? 0.2 : 0.8;
@@ -228,7 +218,7 @@ loop(NOTES_PER_PAGE,
   gfx_x = x + 4;
   gfx_y = y + floor((cell_h - 12) * 0.5);
 
-  sprintf(#note_str, "N %03d", idx_note);
+  sprintf(#note_str, "N %03d", idxn);
   gfx_drawstr(#note_str);
 
   i += 1;
