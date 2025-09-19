@@ -1,4 +1,4 @@
-desc:Note On Toggler - 2x64 Notes, Omni + Scalable UI (+ memory preview + output semitone shift)
+desc:Note On Toggler - 2x64 Notes, Omni + Scalable UI (+ memory preview + output semitone shift; OUT based on grid state + IN/OUT logs)
 
 // -------------------------
 // Sliders
@@ -13,29 +13,33 @@ slider5:0<-64,64,1>Output semitone shift
 // @init
 // -------------------------
 @init
+// Stałe
 NOTES_PER_PAGE = 64;
 TOTAL_NOTES    = 128;
 
+// --- separacja pamięci tablic ---
+STATE_BASE   = 0;                 STATE_SIZE   = 128;
+SENTMAP_BASE = STATE_BASE+STATE_SIZE+16; 
+SENTMAP_SIZE = 16*128;
+
+state    = STATE_BASE;    // baza state[]
+sent_map = SENTMAP_BASE;  // baza sent_map[]
+
+// Slidery
 channel        = slider1 - 1; // -1 = Omni; 0..15 = ch 1..16
 color_mode     = slider2;
 page           = slider3;
 toggle_noteoff = slider4;
 out_shift      = slider5;
 
-last_note = -1;
-last_vel  = -1;
-last_ch   = -1;
-last_cmd  = -1;
+// UI: ostatnie IN/OUT
+last_in_status = -1; last_in_ch = -1; last_in_d1 = -1; last_in_d2 = -1;
+last_out_status = -1; last_out_ch = -1; last_out_d1 = -1; last_out_d2 = -1;
 
-// state[]: pamięć 0..127 (0 = off, 1 = on)
-
-// Mapa wysłanych nut po transpozycji: dla (kanał * 128 + oryg_note) -> realnie wysłana nuta
-// Inicjalizacja do -1 (brak mapowania)
-i = 0;
-loop(16*128,
-  sent_map[i] = -1;
-  i += 1;
-);
+// Zerowanie state[]
+i=0; loop(STATE_SIZE, state[i]=0; i+=1;);
+// Init sent_map = -1
+i=0; loop(SENTMAP_SIZE, sent_map[i]=-1; i+=1;);
 
 // -------------------------
 // @slider
@@ -48,7 +52,7 @@ toggle_noteoff = slider4;
 out_shift      = slider5;
 
 // -------------------------
-// @block — MIDI logic + output transpose
+// @block — wejście przełącza GRID; OUT bazuje na stanie grida
 // -------------------------
 @block
 while ( midirecv(offset, msg1, msg23) ?
@@ -59,187 +63,203 @@ while ( midirecv(offset, msg1, msg23) ?
   d1 =  msg23       & 0x7F;
   d2 = (msg23 >> 8) & 0x7F;
 
+  // Log IN (diagnostyka)
+  last_in_status = status;
+  last_in_ch     = ch;
+  last_in_d1     = d1;
+  last_in_d2     = d2;
+
   reacts = (channel < 0) || (ch == channel);
   base   = page ? 64 : 0;
   high   = base + NOTES_PER_PAGE;
 
-  // ======= LOGIKA TOGGLE / PAMIĘCI (na nutach WEJŚCIOWYCH) =======
-  // NOTE ON (vel>0) => toggle
+  // ===== ZDARZENIE TOGGLE z wejścia =====
+  // NOTE ON: vel>0 zawsze przełącza; vel==0 przełącza tylko gdy włączony toggle_noteoff
   (status == 0x90) && reacts ? (
-    note = d1; vel = d2;
+    in_note = d1; in_vel = d2;
 
-    // jeśli vel==0 i włączony toggle_noteoff, potraktuj jak Note Off (toggle)
-    (vel == 0 && toggle_noteoff) ? (
-      (note >= base && note < high) ? (
-        idxn = note & 0x7F;
-        state[idxn] = state[idxn] ? 0 : 1;
-        last_note = note; last_vel = 0; last_ch = ch; last_cmd = -1;
+    (in_vel == 0 && toggle_noteoff) ? (
+      (in_note >= base && in_note < high) ? (
+        idx = in_note & 0x7F;
+        new_state = state[idx] ? 0 : 1;
+        state[idx] = new_state;
+
+        map_idx = ch*128 + in_note;
+
+        // WYJŚCIE wg stanu
+        new_state == 1 ? (
+          out_note = min(127, max(0, in_note + out_shift)) & 0x7F;
+          out_vel  = 100; // sensowny ON vel, gdy wejście ma 0
+          // zapisz mapowanie i wyślij Note On
+          sent_map[map_idx] = out_note;
+          out_m1  = (0x90 | ch);
+          out_m23 = ((out_vel & 0x7F) << 8) | out_note;
+          midisend(offset, out_m1, out_m23);
+          last_out_status=0x90; last_out_ch=ch; last_out_d1=out_note; last_out_d2=out_vel;
+        ) : (
+          off_note = sent_map[map_idx];
+          off_note >= 0 ? (
+            out_m1  = (0x80 | ch);
+            out_m23 = (0 << 8) | (off_note & 0x7F);
+            midisend(offset, out_m1, out_m23);
+            last_out_status=0x80; last_out_ch=ch; last_out_d1=off_note; last_out_d2=0;
+            sent_map[map_idx] = -1;
+          ) : (
+            out_note = min(127, max(0, in_note + out_shift)) & 0x7F;
+            out_m1  = (0x80 | ch);
+            out_m23 = (0 << 8) | out_note;
+            midisend(offset, out_m1, out_m23);
+            last_out_status=0x80; last_out_ch=ch; last_out_d1=out_note; last_out_d2=0;
+          );
+        );
       );
     ) :
-    (vel > 0) ? (
-      (note >= base && note < high) ? (
-        idxn = note & 0x7F;
-        state[idxn] = state[idxn] ? 0 : 1;
-        last_note = note; last_vel = vel; last_ch = ch; last_cmd = -1;
+    (in_vel > 0) ? (
+      (in_note >= base && in_note < high) ? (
+        idx = in_note & 0x7F;
+        new_state = state[idx] ? 0 : 1;
+        state[idx] = new_state;
+
+        map_idx = ch*128 + in_note;
+
+        new_state == 1 ? (
+          out_note = min(127, max(0, in_note + out_shift)) & 0x7F;
+          sent_map[map_idx] = out_note;
+          out_m1  = (0x90 | ch);
+          out_m23 = ((in_vel & 0x7F) << 8) | out_note;
+          midisend(offset, out_m1, out_m23);
+          last_out_status=0x90; last_out_ch=ch; last_out_d1=out_note; last_out_d2=in_vel;
+        ) : (
+          off_note = sent_map[map_idx];
+          off_note >= 0 ? (
+            out_m1  = (0x80 | ch);
+            out_m23 = (0 << 8) | (off_note & 0x7F);
+            midisend(offset, out_m1, out_m23);
+            last_out_status=0x80; last_out_ch=ch; last_out_d1=off_note; last_out_d2=0;
+            sent_map[map_idx] = -1;
+          ) : (
+            out_note = min(127, max(0, in_note + out_shift)) & 0x7F;
+            out_m1  = (0x80 | ch);
+            out_m23 = (0 << 8) | out_note;
+            midisend(offset, out_m1, out_m23);
+            last_out_status=0x80; last_out_ch=ch; last_out_d1=out_note; last_out_d2=0;
+          );
+        );
       );
     );
   );
 
-  // NOTE OFF (0x80) — opcjonalnie też toggle
+  // NOTE OFF — opcjonalny “trigger” toggla (jeśli włączysz slider4)
   (status == 0x80) && toggle_noteoff && reacts ? (
-    note = d1; vel = d2;
-    (note >= base && note < high) ? (
-      idxn = note & 0x7F;
-      state[idxn] = state[idxn] ? 0 : 1;
-      last_note = note; last_vel = vel; last_ch = ch; last_cmd = -1;
-    );
-  );
+    in_note = d1; in_vel = d2;
+    (in_note >= base && in_note < high) ? (
+      idx = in_note & 0x7F;
+      new_state = state[idx] ? 0 : 1;
+      state[idx] = new_state;
 
-  // CC120/CC123 => reset wszystkich stanów
-  (status == 0xB0) && reacts ? (
-    cc = d1;
-    (cc == 120 || cc == 123) ? (
-      i = 0;
-      loop(TOTAL_NOTES,
-        state[i] = 0;
-        i += 1;
-      );
-      last_cmd  = cc;
-      last_note = -1; last_vel = -1; last_ch = ch;
-    );
-  );
+      map_idx = ch*128 + in_note;
 
-  // ======= WYJŚCIE: transpozycja nut (Note On/Off) z mapowaniem =======
-  // Domyślnie przekazuj bez zmian:
-  out_msg1  = msg1;
-  out_msg23 = msg23;
-
-  // Note On (0x90)
-  status == 0x90 ? (
-    in_note = d1;
-    in_vel  = d2;
-
-    // liczymy przetransponowaną nutę i klampujemy do 0..127
-    shifted = in_note + out_shift;
-    shifted = min(127, max(0, shifted));
-
-    // budujemy nowy msg23
-    out_note = shifted & 0x7F;
-    out_msg23 = (in_vel << 8) | out_note;
-
-    // zapamiętaj mapowanie dla tego kanału i oryginalnej nuty
-    map_idx = ch*128 + in_note;
-    (in_vel > 0) ? ( // tylko prawdziwe Note On
-      sent_map[map_idx] = out_note;
-    ) : (
-      // Note On vel=0: traktowane jako off — użyj mapowania jeżeli jest
-      off_note = sent_map[map_idx];
-      off_note >= 0 ? (
-        out_msg23 = (in_vel << 8) | (off_note & 0x7F);
-        sent_map[map_idx] = -1;
+      new_state == 1 ? (
+        out_note = min(127, max(0, in_note + out_shift)) & 0x7F;
+        out_vel  = (in_vel>0?in_vel:100);
+        sent_map[map_idx] = out_note;
+        out_m1  = (0x90 | ch);
+        out_m23 = ((out_vel & 0x7F) << 8) | out_note;
+        midisend(offset, out_m1, out_m23);
+        last_out_status=0x90; last_out_ch=ch; last_out_d1=out_note; last_out_d2=out_vel;
       ) : (
-        // brak mapowania -> wyślij zgodnie z bieżącym shift
-        out_msg23 = (in_vel << 8) | out_note;
+        off_note = sent_map[map_idx];
+        off_note >= 0 ? (
+          out_m1  = (0x80 | ch);
+          out_m23 = (0 << 8) | (off_note & 0x7F);
+          midisend(offset, out_m1, out_m23);
+          last_out_status=0x80; last_out_ch=ch; last_out_d1=off_note; last_out_d2=0;
+          sent_map[map_idx] = -1;
+        ) : (
+          out_note = min(127, max(0, in_note + out_shift)) & 0x7F;
+          out_m1  = (0x80 | ch);
+          out_m23 = (0 << 8) | out_note;
+          midisend(offset, out_m1, out_m23);
+          last_out_status=0x80; last_out_ch=ch; last_out_d1=out_note; last_out_d2=0;
+        );
       );
     );
   );
 
-  // Note Off (0x80)
-  status == 0x80 ? (
-    in_note = d1;
-    in_vel  = d2;
-
-    map_idx = ch*128 + in_note;
-    off_note = sent_map[map_idx];
-
-    off_note >= 0 ? (
-      // użyj dokładnie tej nuty, którą wcześniej włączyliśmy
-      out_msg23 = (in_vel << 8) | (off_note & 0x7F);
-      sent_map[map_idx] = -1;
-    ) : (
-      // brak zapisu (np. off bez on) -> użyj bieżącego shifta
-      shifted = in_note + out_shift;
-      shifted = min(127, max(0, shifted));
-      out_msg23 = (in_vel << 8) | (shifted & 0x7F);
-    );
+  // Inne komunikaty przepuszczamy bez zmian (opcjonalnie można je zablokować)
+  (status != 0x90 && status != 0x80) ? (
+    midisend(offset, msg1, msg23);
+    last_out_status = msg1 & 0xF0;
+    last_out_ch     = msg1 & 0x0F;
+    last_out_d1     = msg23 & 0x7F;
+    last_out_d2     = (msg23 >> 8) & 0x7F;
   );
 
-  // Wyślij
-  midisend(offset, out_msg1, out_msg23);
   1;
 ) : 0 );
 
 // -------------------------
-// @gfx — scalable UI + fixed header/status + memory preview
+// @gfx — UI + memory preview + IN/OUT logs
 // -------------------------
 @gfx
-// Tło (opis == wartość)
-gfx_clear = color_mode == 1 ? 0x202020   // Dark Gray
-         : color_mode == 2 ? 0x303030   // Gray
-         :                    0x000000; // Black
+gfx_clear = color_mode == 1 ? 0x202020
+         : color_mode == 2 ? 0x303030
+         :                    0x000000;
 gfx_a = 1;
 
-// Layout
 margin      = 10;
-pad_between = 4;   // odstępy między sekcjami
+pad_between = 4;
 bottompad   = margin;
 
-cols = 8;
-rows = 8;
-
+cols = 8; rows = 8;
 gfx_setfont(1, "", 14);
 
-// Header + status
+// Header
 (channel < 0) ?
   sprintf(#hdr, "Note Toggler - Channel: Omni - Page: %s - Shift: %+d", page ? "64-127" : "0-63", out_shift)
 :
   sprintf(#hdr, "Note Toggler - Channel: %d - Page: %s - Shift: %+d", channel+1, page ? "64-127" : "0-63", out_shift);
-
-(last_note >= 0) ? (
-  sprintf(#st, "Last: Note %d  Vel %d  Ch %d%s",
-          last_note, max(0,last_vel), (last_ch>=0?last_ch+1:0),
-          toggle_noteoff ? "  [NoteOff toggle: ON]" : "");
-) :
-(last_cmd >= 0) ? (
-  sprintf(#st, "Reset via CC %d  Ch %d", last_cmd, (last_ch>=0?last_ch+1:0));
-) : (
-  sprintf(#st, "Waiting for MIDI...");
-);
-
-// Zmierz i narysuj header + status
 gfx_measurestr(#hdr, hdr_w, hdr_h);
-gfx_measurestr(#st,  st_w,  st_h);
-
 gfx_r = gfx_g = gfx_b = 1;
-gfx_x = margin; gfx_y = margin;                       gfx_drawstr(#hdr);
-gfx_x = margin; gfx_y = margin + hdr_h + pad_between; gfx_drawstr(#st);
+y = margin; x = margin;
+gfx_x = x; gfx_y = y; gfx_drawstr(#hdr);
 
-// Krótki podgląd pamięci na BIEŻĄCEJ stronie (licznik + lista ID)
+// Status IN
+(last_in_status >= 0) ? (
+  last_in_status == 0x80 ? (sprintf(#it,"IN: NoteOff");)
+  : last_in_status == 0x90 ? (sprintf(#it,"IN: NoteOn");)
+  : last_in_status == 0xB0 ? (sprintf(#it,"IN: CC");)
+  : last_in_status == 0xE0 ? (sprintf(#it,"IN: Pitch");)
+  : (sprintf(#it,"IN: 0x%02X", last_in_status););
+  sprintf(#inln, "%s  Ch %d  d1=%3d  d2=%3d", #it, last_in_ch+1, last_in_d1, last_in_d2);
+) : (
+  sprintf(#inln, "IN: —");
+);
+gfx_measurestr(#inln, in_w, in_h);
+y += hdr_h + pad_between;
+gfx_x = x; gfx_y = y; gfx_drawstr(#inln);
+
+// Memory preview
 base = page ? 64 : 0;
-active_count = 0;
-#active_list = "";
-i = 0;
-loop(NOTES_PER_PAGE,
+active_count = 0; #active_list = "";
+i = 0; loop(NOTES_PER_PAGE,
   idxn = base + i;
   state[idxn] ? (
     active_count += 1;
-    strlen(#active_list) < 120 ? (
-      sprintf(#tmp, "%s%d ", #active_list, idxn);
-      strcpy(#active_list, #tmp);
-    );
+    strlen(#active_list) < 120 ? ( sprintf(#tmp, "%s%d ", #active_list, idxn); strcpy(#active_list, #tmp); );
   );
   i += 1;
 );
 sprintf(#memline, "Active on page: %d  [%s]", active_count, #active_list);
-
 gfx_measurestr(#memline, mem_w, mem_h);
-gfx_x = margin; gfx_y = margin + hdr_h + pad_between + st_h + pad_between;
-gfx_drawstr(#memline);
+y += in_h + pad_between;
+gfx_x = x; gfx_y = y; gfx_drawstr(#memline);
 
 // GRID
-top_of_grid = margin + hdr_h + pad_between + st_h + pad_between + mem_h + pad_between;
+y += mem_h + pad_between;
+top_of_grid = y;
 avail_w = max(1, gfx_w - 2*margin);
-avail_h = max(1, gfx_h - top_of_grid - bottompad);
+avail_h = max(1, gfx_h - top_of_grid - bottompad - 20 - pad_between); // miejsce na log OUT
 
 cell_w = floor(avail_w / cols);
 cell_h = floor(avail_h / rows);
@@ -251,14 +271,14 @@ grid_h = cell_h * rows;
 grid_x0 = margin + floor((avail_w - grid_w) * 0.5);
 grid_y0 = top_of_grid;
 
-// Rysowanie gridu
+// rysowanie gridu
 i = 0;
 loop(NOTES_PER_PAGE,
   row = floor(i / cols);
   col = i % cols;
 
-  x = grid_x0 + col * cell_w;
-  y = grid_y0 + row * cell_h;
+  gx = grid_x0 + col * cell_w;
+  gy = grid_y0 + row * cell_h;
 
   idxn = base + i;
   on = state[idxn] ? 1 : 0;
@@ -267,27 +287,40 @@ loop(NOTES_PER_PAGE,
   gfx_r = on ? 0.10 : 0.07;
   gfx_g = on ? 0.30 : 0.07;
   gfx_b = on ? 0.10 : 0.07;
-  gfx_rect(x, y, cell_w-1, cell_h-1);
+  gfx_rect(gx, gy, cell_w-1, cell_h-1);
 
   // ramka
   gfx_r = gfx_g = gfx_b = 0.6;
-  gfx_line(x, y, x + cell_w - 1, y);
-  gfx_line(x, y, x, y + cell_h - 1);
-  gfx_line(x + cell_w - 1, y, x + cell_w - 1, y + cell_h - 1);
-  gfx_line(x, y + cell_h - 1, x + cell_w - 1, y + cell_h - 1);
+  gfx_line(gx, gy, gx + cell_w - 1, gy);
+  gfx_line(gx, gy, gx, gy + cell_h - 1);
+  gfx_line(gx + cell_w - 1, gy, gx + cell_w - 1, gy + cell_h - 1);
+  gfx_line(gx, gy + cell_h - 1, gx + cell_w - 1, gy + cell_h - 1);
 
-  // etykieta
+  // podpis
   gfx_r = on ? 0.2 : 0.8;
   gfx_g = on ? 1.0 : 0.8;
   gfx_b = on ? 0.2 : 0.8;
-
-  gfx_x = x + 4;
-  gfx_y = y + floor((cell_h - 12) * 0.5);
-
+  gfx_x = gx + 4;
+  gfx_y = gy + floor((cell_h - 12) * 0.5);
   sprintf(#note_str, "N %03d", idxn);
   gfx_drawstr(#note_str);
 
   i += 1;
 );
+
+// Log OUT
+y = grid_y0 + grid_h + pad_between;
+(last_out_status >= 0) ? (
+  last_out_status == 0x80 ? (sprintf(#ot,"OUT: NoteOff");)
+  : last_out_status == 0x90 ? (sprintf(#ot,"OUT: NoteOn");)
+  : last_out_status == 0xB0 ? (sprintf(#ot,"OUT: CC");)
+  : last_out_status == 0xE0 ? (sprintf(#ot,"OUT: Pitch");)
+  : (sprintf(#ot,"OUT: 0x%02X", last_out_status););
+  sprintf(#outln, "%s  Ch %d  d1=%3d  d2=%3d", #ot, last_out_ch+1, last_out_d1, last_out_d2);
+) : (
+  sprintf(#outln, "OUT: —");
+);
+gfx_r = gfx_g = gfx_b = 1;
+gfx_x = x; gfx_y = y; gfx_drawstr(#outln);
 
 gfx_dirty = 1;
