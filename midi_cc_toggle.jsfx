@@ -1,4 +1,4 @@
-desc:Note On Toggler - 2x64 Notes, Omni + Scalable UI (+ memory preview)
+desc:Note On Toggler - 2x64 Notes, Omni + Scalable UI (+ memory preview + output semitone shift)
 
 // -------------------------
 // Sliders
@@ -7,6 +7,7 @@ slider1:0<0,16,1{Omni,Channel 1,Channel 2,Channel 3,Channel 4,Channel 5,Channel 
 slider2:1<1,3,1{Dark Gray,Gray,Black}>Color Scheme
 slider3:0<0,1,1{Notes 0-63,Notes 64-127}>Page
 slider4:0<0,1,1{Off,On}>Toggle on Note Off
+slider5:0<-64,64,1>Output semitone shift
 
 // -------------------------
 // @init
@@ -19,6 +20,7 @@ channel        = slider1 - 1; // -1 = Omni; 0..15 = ch 1..16
 color_mode     = slider2;
 page           = slider3;
 toggle_noteoff = slider4;
+out_shift      = slider5;
 
 last_note = -1;
 last_vel  = -1;
@@ -26,6 +28,14 @@ last_ch   = -1;
 last_cmd  = -1;
 
 // state[]: pamięć 0..127 (0 = off, 1 = on)
+
+// Mapa wysłanych nut po transpozycji: dla (kanał * 128 + oryg_note) -> realnie wysłana nuta
+// Inicjalizacja do -1 (brak mapowania)
+i = 0;
+loop(16*128,
+  sent_map[i] = -1;
+  i += 1;
+);
 
 // -------------------------
 // @slider
@@ -35,9 +45,10 @@ channel        = slider1 - 1;
 color_mode     = slider2;
 page           = slider3;
 toggle_noteoff = slider4;
+out_shift      = slider5;
 
 // -------------------------
-// @block — MIDI logic
+// @block — MIDI logic + output transpose
 // -------------------------
 @block
 while ( midirecv(offset, msg1, msg23) ?
@@ -52,11 +63,12 @@ while ( midirecv(offset, msg1, msg23) ?
   base   = page ? 64 : 0;
   high   = base + NOTES_PER_PAGE;
 
-  // NOTE ON (vel > 0) — jedyne pewne źródło toggla
+  // ======= LOGIKA TOGGLE / PAMIĘCI (na nutach WEJŚCIOWYCH) =======
+  // NOTE ON (vel>0) => toggle
   (status == 0x90) && reacts ? (
     note = d1; vel = d2;
 
-    // jeśli vel==0 i włączony toggle_noteoff, traktuj jak NOTE OFF
+    // jeśli vel==0 i włączony toggle_noteoff, potraktuj jak Note Off (toggle)
     (vel == 0 && toggle_noteoff) ? (
       (note >= base && note < high) ? (
         idxn = note & 0x7F;
@@ -73,7 +85,7 @@ while ( midirecv(offset, msg1, msg23) ?
     );
   );
 
-  // NOTE OFF (0x80) — opcjonalnie
+  // NOTE OFF (0x80) — opcjonalnie też toggle
   (status == 0x80) && toggle_noteoff && reacts ? (
     note = d1; vel = d2;
     (note >= base && note < high) ? (
@@ -83,7 +95,7 @@ while ( midirecv(offset, msg1, msg23) ?
     );
   );
 
-  // CONTROL CHANGE — CC120/CC123 => reset wszystkich stanów
+  // CC120/CC123 => reset wszystkich stanów
   (status == 0xB0) && reacts ? (
     cc = d1;
     (cc == 120 || cc == 123) ? (
@@ -97,8 +109,63 @@ while ( midirecv(offset, msg1, msg23) ?
     );
   );
 
-  // pass-through
-  midisend(offset, msg1, msg23);
+  // ======= WYJŚCIE: transpozycja nut (Note On/Off) z mapowaniem =======
+  // Domyślnie przekazuj bez zmian:
+  out_msg1  = msg1;
+  out_msg23 = msg23;
+
+  // Note On (0x90)
+  status == 0x90 ? (
+    in_note = d1;
+    in_vel  = d2;
+
+    // liczymy przetransponowaną nutę i klampujemy do 0..127
+    shifted = in_note + out_shift;
+    shifted = min(127, max(0, shifted));
+
+    // budujemy nowy msg23
+    out_note = shifted & 0x7F;
+    out_msg23 = (in_vel << 8) | out_note;
+
+    // zapamiętaj mapowanie dla tego kanału i oryginalnej nuty
+    map_idx = ch*128 + in_note;
+    (in_vel > 0) ? ( // tylko prawdziwe Note On
+      sent_map[map_idx] = out_note;
+    ) : (
+      // Note On vel=0: traktowane jako off — użyj mapowania jeżeli jest
+      off_note = sent_map[map_idx];
+      off_note >= 0 ? (
+        out_msg23 = (in_vel << 8) | (off_note & 0x7F);
+        sent_map[map_idx] = -1;
+      ) : (
+        // brak mapowania -> wyślij zgodnie z bieżącym shift
+        out_msg23 = (in_vel << 8) | out_note;
+      );
+    );
+  );
+
+  // Note Off (0x80)
+  status == 0x80 ? (
+    in_note = d1;
+    in_vel  = d2;
+
+    map_idx = ch*128 + in_note;
+    off_note = sent_map[map_idx];
+
+    off_note >= 0 ? (
+      // użyj dokładnie tej nuty, którą wcześniej włączyliśmy
+      out_msg23 = (in_vel << 8) | (off_note & 0x7F);
+      sent_map[map_idx] = -1;
+    ) : (
+      // brak zapisu (np. off bez on) -> użyj bieżącego shifta
+      shifted = in_note + out_shift;
+      shifted = min(127, max(0, shifted));
+      out_msg23 = (in_vel << 8) | (shifted & 0x7F);
+    );
+  );
+
+  // Wyślij
+  midisend(offset, out_msg1, out_msg23);
   1;
 ) : 0 );
 
@@ -124,9 +191,9 @@ gfx_setfont(1, "", 14);
 
 // Header + status
 (channel < 0) ?
-  sprintf(#hdr, "Note Toggler - Channel: Omni - Page: %s", page ? "64-127" : "0-63")
+  sprintf(#hdr, "Note Toggler - Channel: Omni - Page: %s - Shift: %+d", page ? "64-127" : "0-63", out_shift)
 :
-  sprintf(#hdr, "Note Toggler - Channel: %d - Page: %s", channel+1, page ? "64-127" : "0-63");
+  sprintf(#hdr, "Note Toggler - Channel: %d - Page: %s - Shift: %+d", channel+1, page ? "64-127" : "0-63", out_shift);
 
 (last_note >= 0) ? (
   sprintf(#st, "Last: Note %d  Vel %d  Ch %d%s",
@@ -156,7 +223,6 @@ loop(NOTES_PER_PAGE,
   idxn = base + i;
   state[idxn] ? (
     active_count += 1;
-    // do 24 indeksów do podglądu
     strlen(#active_list) < 120 ? (
       sprintf(#tmp, "%s%d ", #active_list, idxn);
       strcpy(#active_list, #tmp);
