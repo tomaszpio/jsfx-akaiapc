@@ -1,0 +1,104 @@
+desc:Note On Toggler - 64 Notes + Reset on All Notes Off
+
+slider1:1<1,16,1{Channel 1,Channel 2,Channel 3,Channel 4,Channel 5,Channel 6,Channel 7,Channel 8,Channel 9,Channel 10,Channel 11,Channel 12,Channel 13,Channel 14,Channel 15,Channel 16}>MIDI Channel
+slider2:1<0,2,1{Dark Gray,Gray,Black}>Color Scheme
+
+@init
+mem = 64;
+channel = slider1 - 1;
+color_mode = slider2;
+last_note = -1;
+last_cmd = -1;
+
+@slider
+channel = slider1 - 1;
+color_mode = slider2;
+
+@block
+while (
+    midirecv(offset, msg1, msg23) ?
+    (
+        status = msg1 & 0xF0;
+        ch = msg1 & 0x0F;
+
+        // NOTE ON
+        status == 0x90 && ch == channel ? (
+            note = msg23 & 0x7F;
+            vel  = (msg23 >> 8) & 0x7F;
+
+            note < 64 && vel > 0 ? (
+                mem[note] = mem[note] ? 0 : 1;
+                last_note = note;
+                last_cmd = -1;
+            );
+        );
+
+        // CONTROL CHANGE
+        status == 0xB0 && ch == channel ? (
+            cc = msg23 & 0x7F;
+            val = (msg23 >> 8) & 0x7F;
+
+            (cc == 120 || cc == 123) ? (
+                i = 0;
+                loop(64,
+                    mem[i] = 0;
+                    i += 1;
+                );
+                last_cmd = cc; // for display
+                last_note = -1;
+            );
+        );
+
+        midisend(offset, msg1, msg23);
+        1;
+    ) : 0;
+);
+
+@gfx
+gfx_clear = color_mode == 1 ? 0x202020 : color_mode == 2 ? 0x000000 : 0x101010;
+gfx_a = 1;
+
+// Header
+gfx_x = 10;
+gfx_y = 10;
+last_note >= 0 ? (
+    sprintf(#label, "Note Toggler — Channel %d — Last Note: %d", channel + 1, last_note);
+) :
+last_cmd >= 0 ? (
+    sprintf(#label, "Note Toggler — Channel %d — Reset via CC %d", channel + 1, last_cmd);
+) : (
+    sprintf(#label, "Note Toggler — Channel %d", channel + 1);
+);
+gfx_r = gfx_g = gfx_b = 1;
+gfx_drawstr(#label);
+
+// Grid
+grid_y = 40;
+cell_w = 60;
+cell_h = 20;
+cols = 8;
+
+i = 0;
+while (i < 64) (
+    row = floor(i / cols);
+    col = i % cols;
+
+    x = 10 + col * cell_w;
+    y = grid_y + row * cell_h;
+
+    gfx_x = x;
+    gfx_y = y;
+
+    mem[i] == 1 ? (
+        gfx_r = 0.2; gfx_g = 1.0; gfx_b = 0.2;
+    ) : (
+        gfx_r = 0.4; gfx_g = 0.4; gfx_b = 0.4;
+    );
+
+    sprintf(#note_str, "N %02d", i);
+    gfx_drawstr(#note_str);
+
+    i += 1;
+);
+
+gfx_dirty = 1;
