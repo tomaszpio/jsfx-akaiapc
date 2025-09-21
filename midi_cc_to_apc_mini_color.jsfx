@@ -1,19 +1,18 @@
-desc:APC Mini Pad RGB Toggle (Purple / Off) - Banked Control + Color Picker
+desc:Note State + Grid (16 slots) — toggle on NOTE ON>0, offset & channel selectable — NO MIDI OUT
 
-slider1:0<0,3,1{Bank 1,Bank 2,Bank 3,Bank 4}>Active Pad Bank
-slider2:0<0,63,1>Last Triggered Pad (readonly)
-slider3:0<0,127,1>Pad Color Index
-slider4:0<0,15,1>Input MIDI Channel (0=Ch1 ... 15=Ch16)
-slider5:0<-127,127,1>Note Shift (Semitones)
+// -------------------------
+// Sliders (state+grid only)
+// -------------------------
+slider1:0<0,16,1{Omni,Channel 1,Channel 2,Channel 3,Channel 4,Channel 5,Channel 6,Channel 7,Channel 8,Channel 9,Channel 10,Channel 11,Channel 12,Channel 13,Channel 14,Channel 15,Channel 16}>MIDI Channel (for input gating)
+slider2:1<1,3,1{Dark Gray,Gray,Black}>Color Scheme
+slider3:0<0,112,1>Slot base note (offset)
+slider4:0<0,127,1>Pad Color Index
 
+// -------------------------
+// @init — state & minimal logs
+// -------------------------
 @init
-gfx_clear = 1;
-sysex_len = 16;
-
-// Initialize 16 pad toggle variables (used per-bank)
-pad0=pad1=pad2=pad3=pad4=pad5=pad6=pad7=pad8=pad9=pad10=pad11=pad12=pad13=pad14=pad15=0;
-
-// Define your 144 RGB triplets here (packed R<<16|G<<8|B)
+// color palette (0..127 -> 0xRRGGBB)
 color[0]=0x000000;  color[1]=0x1E1E1E;  color[2]=0x7F7F7F;  color[3]=0xFFFFFF;  color[4]=0xFF4C4C;
 color[5]=0xFF0000;  color[6]=0x590000;  color[7]=0x190000;  color[8]=0xFFBD6C;  color[9]=0xFF5400;
 color[10]=0x591D00; color[11]=0x271B00; color[12]=0xFFFF4C; color[13]=0xFFFF00; color[14]=0x595900;
@@ -41,131 +40,248 @@ color[115]=0x9A99FF; color[116]=0x8E66FF; color[117]=0x404040; color[118]=0x7575
 color[120]=0xA00000; color[121]=0x350000; color[122]=0x1AD000; color[123]=0x074200; color[124]=0xB9B000;
 color[125]=0x3F3100; color[126]=0xB35F00; color[127]=0x4B1502;
 
+SLOTS = 16;                       // 4x4 grid
+STATE_BASE = 0; STATE_SIZE = SLOTS;
+state = STATE_BASE;               // 16 booleans: 0/1
+sysex = 16;
 
-@block
-while (midirecv(offset, msg1, msg2, msg3)) (
-    status = msg1 & $xF0;
-    channel = (msg1 & $x0F) + 1;
+// minimal logs for UI
+last_in_status=-1; last_in_ch=-1; last_in_d1=-1; last_in_d2=-1;
+last_toggle_slot=-1; last_toggle_newstate=-1;
+last_reset_cc=-1; last_reset_ch=-1;
 
-    // Only respond to Note On on channel 1 with velocity > 0
-    (status == $x90) && (msg3 > 0) && (channel == slider4 + 1) ? (
-  
-    
-        note = msg2 + slider5;
-        (note < 0) ? note = 0;
-        (note > 127) ? note = 127;
-        bank_offset = slider1 * 16;
-
-        // Check if note is in current bank range
-        (note >= bank_offset) && (note < bank_offset + 16) ? (
-            pad_index = note - bank_offset;
-            slider2 = note;
-
-            // Get toggle state
-            val = pad_index == 0 ? pad0 :
-                  pad_index == 1 ? pad1 :
-                  pad_index == 2 ? pad2 :
-                  pad_index == 3 ? pad3 :
-                  pad_index == 4 ? pad4 :
-                  pad_index == 5 ? pad5 :
-                  pad_index == 6 ? pad6 :
-                  pad_index == 7 ? pad7 :
-                  pad_index == 8 ? pad8 :
-                  pad_index == 9 ? pad9 :
-                  pad_index == 10 ? pad10 :
-                  pad_index == 11 ? pad11 :
-                  pad_index == 12 ? pad12 :
-                  pad_index == 13 ? pad13 :
-                  pad_index == 14 ? pad14 :
-                  pad_index == 15 ? pad15 : 0;
-
-            new_val = val == 0 ? 1 : 0;
-
-            // Store toggle state
-            pad_index == 0 ? pad0 = new_val :
-            pad_index == 1 ? pad1 = new_val :
-            pad_index == 2 ? pad2 = new_val :
-            pad_index == 3 ? pad3 = new_val :
-            pad_index == 4 ? pad4 = new_val :
-            pad_index == 5 ? pad5 = new_val :
-            pad_index == 6 ? pad6 = new_val :
-            pad_index == 7 ? pad7 = new_val :
-            pad_index == 8 ? pad8 = new_val :
-            pad_index == 9 ? pad9 = new_val :
-            pad_index == 10 ? pad10 = new_val :
-            pad_index == 11 ? pad11 = new_val :
-            pad_index == 12 ? pad12 = new_val :
-            pad_index == 13 ? pad13 = new_val :
-            pad_index == 14 ? pad14 = new_val :
-            pad_index == 15 ? pad15 = new_val;
-
-            // Get RGB for current slider3 color index
-            rgb = color[slider3];
-            R = (rgb & 0xFF0000) >> 16;
-            G = (rgb & 0x00FF00) >> 8;
-            B = (rgb & 0x0000FF);
-
-            // Convert RGB 0-255 to SysEx 0-127 scale
-            sysexR = R * 127 / 255;
-            sysexG = G * 127 / 255;
-            sysexB = B * 127 / 255;
-
-            // Prepare SysEx message to light pad
-            sysex[0] = 0xF0;
-            sysex[1] = 0x47;
-            sysex[2] = 0x7F;
-            sysex[3] = 0x4F;
-            sysex[4] = 0x24;
-// Number of data bytes MSB and LSB (split 14-bit count)
-sysex[5] = 0x00;  // MSB
-sysex[6] = 0x08;         // LSB
-
-// For each pad (only 1 here)
-sysex[7] = note;  // Start Pad
-sysex[8] = note;  // End Pad
-
-            (new_val == 1) ? (
-                // Use selected color for ON state
-             sysex[9]  = 0;          // Red MSB
-             sysex[10] = sysexR;     // Red LSB
-             sysex[11] = 0;          // Green MSB
-             sysex[12] = sysexG;     // Green LSB
-             sysex[13] = 0;          // Blue MSB
-             sysex[14] = sysexB;     // Blue LSB
-             sysex[15] = 0xF7;
-             midisend_buf(offset, sysex, sysex_len);
-            ) : (
-                // Off state
-                sysex[9] = 0;
-                sysex[10] = 0;
-                sysex[11] = 0;
-                sysex[12] = 0;
-                sysex[13] = 0;
-                sysex[14] = 0;
-                sysex[15] = 0xF7;
-                midisend_buf(offset, sysex, sysex_len);
-            );
-
-        );
-    );
+// clear states
+i = 0;
+loop(STATE_SIZE,
+  state[i] = 0;
+  i += 1;
 );
 
+// Helper: SysEx OFF for pad id 0..63
+function send_pad_off(off, pid) (
+  sysex[0]  = 0xF0; sysex[1]  = 0x47; sysex[2]  = 0x7F; sysex[3]  = 0x4F; sysex[4]  = 0x24;
+  sysex[5]  = 0x00; sysex[6]  = 0x08;
+  sysex[7]  = pid & 0x7F;      sysex[8]  = pid & 0x7F;
+  sysex[9]  = 0;   sysex[10] = 0;   sysex[11] = 0;   sysex[12] = 0;   sysex[13] = 0;   sysex[14] = 0;
+  sysex[15] = 0xF7;
+  midisend_buf(off, sysex, 16);
+);
+
+// Prebuilt SysEx header
+sysex[0] = 0xF0;
+sysex[1] = 0x47;
+sysex[2] = 0x7F;
+sysex[3] = 0x4F;
+sysex[4] = 0x24;
+sysex[5] = 0x00;
+sysex[6] = 0x08;
+
+// -------------------------
+// @slider — keep settings in sync
+// -------------------------
+@slider
+channel     = slider1 - 1;        // -1..15
+color_mode  = slider2 | 0;
+slot_offset = slider3 | 0;        // 0..112
+color_idx   = slider4 | 0;
+
+// -------------------------
+// @block — update ONLY internal state (NO MIDI OUT / NO THRU)
+// -------------------------
+@block
+while (
+  midirecv(offset, msg1, msg23) ?
+  (
+    status = msg1 & 0xF0;
+    ch     = msg1 & 0x0F;
+    d1     =  msg23       & 0x7F; // note/cc
+    d2     = (msg23 >> 8) & 0x7F; // vel/value
+
+    // minimal IN log for UI
+    last_in_status = status; last_in_ch = ch; last_in_d1 = d1; last_in_d2 = d2;
+
+    reacts = (channel < 0) || (ch == channel);
+
+    // NOTE ON with vel > 0 => toggle slot (state only)  + RGB SysEx
+    (status == 0x90) && (d2 > 0) && reacts ? (
+      slot = d1 - slot_offset;
+      (slot >= 0 && slot < SLOTS) ? (
+        newstate = state[slot] ? 0 : 1;
+        state[slot] = newstate;
+        last_toggle_slot = slot;
+        last_toggle_newstate = newstate;
+
+        (newstate == 1) ? (
+          rgb   = color[color_idx];
+          R     = (rgb & 0xFF0000) >> 16;
+          G     = (rgb & 0x00FF00) >> 8;
+          B     = (rgb & 0x0000FF);
+          sysexR = R * 127 / 255;
+          sysexG = G * 127 / 255;
+          sysexB = B * 127 / 255;
+
+          sysex[7] = d1 & 0x7F;
+          sysex[8] = d1 & 0x7F;
+          sysex[9]  = 0;         sysex[10] = sysexR;
+          sysex[11] = 0;         sysex[12] = sysexG;
+          sysex[13] = 0;         sysex[14] = sysexB;
+          sysex[15] = 0xF7;
+
+          midisend_buf(offset, sysex, 16);
+        ) : (
+          rgb   = color[color_idx];
+          R     = (rgb & 0xFF0000) >> 16;
+          G     = (rgb & 0x00FF00) >> 8;
+          B     = (rgb & 0x0000FF);
+          sysexR = R * 127 / 255;
+          sysexG = G * 127 / 255;
+          sysexB = B * 127 / 255;
+
+          sysex[7] = d1 & 0x7F;
+          sysex[8] = d1 & 0x7F;
+          sysex[9]  = 0;
+          sysex[9]  = 0;
+          sysex[10] = 0;
+          sysex[11] = 0;
+          sysex[12] = 0;
+          sysex[13] = 0;
+          sysex[14] = 0;
+          sysex[15] = 0xF7;
+
+          midisend_buf(offset, sysex, 16);
+        );
+      );
+    );
+
+    // All Notes Off(123) / All Sound Off(120) => clear state (no MIDI out)
+    (status == 0xB0) ? (
+      cc = d1;
+      (cc == 123 || cc == 120) ? (
+        i = 0; loop(SLOTS, state[i] = 0; i += 1;);
+        last_reset_cc = cc; last_reset_ch = ch;
+        pid = 0; loop(64, send_pad_off(offset, pid); pid += 1;);
+      );
+    );
+
+    // swallow everything (no pass-through / no out)
+    1;
+  ) : 0
+);
+
+// -------------------------
+// @gfx — UI + 4x4 grid (state visualisation only)
+// -------------------------
 @gfx
-gfx_set(1,1,1);
+gfx_clear = (color_mode == 1) ? 0x202020 : (color_mode == 2) ? 0x303030 : 0x000000;
+gfx_a = 1;
+margin = 10; pad_between = 4; bottompad = margin; cols = 4; rows = 4;
+gfx_setfont(1, "", 14);
 
-// Suppose color[slider3] is a 24-bit integer RGB (0xRRGGBB)
-col = color[slider3];
+// header
+#ch_str = "";
+(channel < 0) ? strcpy(#ch_str, "Omni") : sprintf(#ch_str, "Ch %d", channel + 1);
+sprintf(#hdr, "State+Grid — %s — Slots:16 — Offset:%d..%d", #ch_str, slot_offset, slot_offset + 15);
+gfx_measurestr(#hdr, w, h);
+gfx_r = gfx_g = gfx_b = 1; gfx_x = margin; gfx_y = margin; gfx_drawstr(#hdr);
 
-// Extract RGB components (0-255)
-r = ((col >> 16) & 0xFF) / 255.0;
-g = ((col >> 8) & 0xFF) / 255.0;
-b = (col & 0xFF) / 255.0;
+// IN log
+(last_in_status >= 0) ?
+(
+  #it = "";
+  (last_in_status == 0x80) ? strcpy(#it, "IN: NoteOff")
+  : (last_in_status == 0x90) ? strcpy(#it, "IN: NoteOn")
+  : (last_in_status == 0xB0) ? strcpy(#it, "IN: CC")
+  : (last_in_status == 0xE0) ? strcpy(#it, "IN: Pitch")
+  : sprintf(#it, "IN: 0x%02X", last_in_status);
+  sprintf(#inln, "%s  Ch %d  d1=%3d  d2=%3d", #it, last_in_ch + 1, last_in_d1, last_in_d2);
+)
+:
+(
+  strcpy(#inln, "IN: —");
+);
+gfx_measurestr(#inln, iw, ih);
+gfx_x = margin; gfx_y = margin + h + pad_between; gfx_drawstr(#inln);
 
-// Set color with normalized floats
-gfx_set(r, g, b);
+// last toggle / last reset
+(last_toggle_slot >= 0) ?
+(
+  sprintf(#tgl, "Last toggle: slot %d  -> %s  (note %d)", last_toggle_slot, (last_toggle_newstate ? "ON" : "OFF"), slot_offset + last_toggle_slot);
+)
+:
+(
+  strcpy(#tgl, "Last toggle: —");
+);
+gfx_measurestr(#tgl, tw, th);
+gfx_x = margin; gfx_y = margin + h + pad_between + ih + pad_between; gfx_drawstr(#tgl);
 
-// Draw filled rectangle 30x30 at (10,50)
-gfx_rect(10, 10, 60, 60);
+(last_reset_cc >= 0) ?
+(
+  sprintf(#rst, "Last reset: CC %d  on Ch %d", last_reset_cc, last_reset_ch + 1);
+)
+:
+(
+  strcpy(#rst, "Last reset: —");
+);
+gfx_measurestr(#rst, rw, rh);
+gfx_x = margin; gfx_y = margin + h + pad_between + ih + pad_between + th + pad_between; gfx_drawstr(#rst);
 
-// Reset to white for next gfx calls
-gfx_set(1, 1, 1);
+// ==== Color preview square to the right of logs ====
+col = color[color_idx];
+pr  = ((col >> 16) & 255) / 255.0;
+pg  = ((col >> 8)  & 255) / 255.0;
+pb  = ( col        & 255) / 255.0;
+box = 48;
+bx  = gfx_w - margin - box;
+by  = margin + h + pad_between; // aligned with IN log row
+gfx_set(pr, pg, pb); gfx_rect(bx, by, box, box); gfx_set(1,1,1);
+
+// GRID 4x4 — left-to-right, top-to-bottom
+top     = margin + h + pad_between + ih + pad_between + th + pad_between + rh + pad_between;
+avail_w = max(1, gfx_w - 2 * margin);
+avail_h = max(1, gfx_h - top - bottompad - 20 - pad_between);
+cell_w  = floor(avail_w / cols);
+cell_h  = floor(avail_h / rows);
+cell_h < 18 ? cell_h = 18;
+grid_w  = cell_w * cols;
+grid_h  = cell_h * rows;
+grid_x0 = margin + floor((avail_w - grid_w) * 0.5);
+grid_y0 = top;
+
+i = 0;
+loop(SLOTS,
+  row = floor(i / cols);
+  col = i % cols;
+
+  gx = grid_x0 + col * cell_w;   // left to right
+  gy = grid_y0 + row * cell_h;   // top to bottom
+
+  on = state[i] ? 1 : 0;
+  real_note = slot_offset + i;
+  real_note < 0 ? real_note = 0 : real_note > 127 ? real_note = 127;
+
+  // cell background
+  gfx_r = on ? pr * 0.25 : 0.07;
+  gfx_g = on ? pg * 0.25 : 0.07;
+  gfx_b = on ? pb * 0.25 : 0.07;
+  gfx_rect(gx, gy, cell_w - 1, cell_h - 1);
+
+  // border
+  gfx_r = gfx_g = gfx_b = 0.6;
+  gfx_line(gx, gy, gx + cell_w - 1, gy);
+  gfx_line(gx, gy, gx, gy + cell_h - 1);
+  gfx_line(gx + cell_w - 1, gy, gx + cell_w - 1, gy + cell_h - 1);
+  gfx_line(gx, gy + cell_h - 1, gx + cell_w - 1, gy + cell_h - 1);
+
+  // label
+  gfx_r = on ? 0.2 : 0.8;
+  gfx_g = on ? 1.0 : 0.8;
+  gfx_b = on ? 0.2 : 0.8;
+  gfx_x = gx + 4;
+  gfx_y = gy + floor((cell_h - 12) * 0.5);
+  sprintf(#lab, "N %03d", real_note);
+  gfx_drawstr(#lab);
+
+  i += 1;
+);
+
+gfx_dirty = 1;
