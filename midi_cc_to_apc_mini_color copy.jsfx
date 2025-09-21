@@ -1,34 +1,54 @@
-desc:APC Mini Pad RGB Toggle - Banked + Color Picker [SysEx-only OUT] + Simple Logs (IN/Shift/Toggle/Color/SysEx)
-
-// ====================================================================
-// PURPOSE
-// - Control APC Mini mk2 pad RGB via SysEx
-// - Only SysEx output (NO MIDI thru)
-// - Toggle per pad within active bank (16 notes per bank, 4 banks total)
-// - Simple logs in @gfx (style similar to Note On Toggler example)
-// ====================================================================
+desc:APC Mini Pad RGB Toggle — 16-slot state like "Note On Toggler", NOTE-Window Offset (16 pads), Color Picker, SysEx-only, CC120/123 reset, Deep Diagnostics (normalized state)
 
 // -------------------------
 // Sliders
 // -------------------------
-slider1:0<0,3,1{Bank 1,Bank 2,Bank 3,Bank 4}>Active Pad Bank
+// slider1 = start note number for the 16-pad window (IDs: offset..offset+15)
+slider1:0<0,111,1>Pad Window Offset (start note ID)
 slider2:0<0,63,1>Last Triggered Pad (readonly)
 slider3:0<0,127,1>Pad Color Index
 slider4:0<0,15,1>Input MIDI Channel (0=Ch1 ... 15=Ch16)
-slider5:0<-127,127,1>Note Shift (Semitones)
+slider5:0<-127,127,1>Note Shift (Semitones) // info-only
 
 // -------------------------
 // @init
 // -------------------------
 @init
-gfx_a = 1;
-gfx_clear = 0;
+gfx_clear = 1;
 sysex_len = 16;
 
-// Toggle states for 16 pads (per active bank)
-pad0=pad1=pad2=pad3=pad4=pad5=pad6=pad7=pad8=pad9=pad10=pad11=pad12=pad13=pad14=pad15=0;
+SLOTS = 16;                                // 4x4 window
+STATE_BASE = 5000; STATE_SIZE = SLOTS;     // safe heap slice
+state = STATE_BASE;
 
-// APC color palette (0xRRGGBB), 0..127
+// logs / state debug
+last_in_status=-1; last_in_ch=-1; last_in_d1=-1; last_in_d2=-1;
+last_pad_index=-1; last_pad_id=-1; last_toggle_state=-1;
+last_reset_cc=-1; last_reset_ch=-1;
+last_color_idx=-1; last_rgb=-1; last_R=-1; last_G=-1; last_B=-1;
+last_Rlsb=-1; last_Glsb=-1; last_Blsb=-1;
+last_shift_orig=-1; last_shift_amt=0; last_shift_new=-1;
+
+last_offset=0; last_slot=-1; last_in_range=0;
+last_val_before=-1; last_newstate=-1; last_after_write=-1;
+state_on_count=0;
+
+// OUT SysEx snapshot
+syxN=0; syx0=0; syx1=0; syx2=0; syx3=0; syx4=0; syx5=0; syx6=0; syx7=0; syx8=0; syx9=0;
+syx10=0; syx11=0; syx12=0; syx13=0; syx14=0; syx15=0;
+
+// diagnostics
+#dbg_event="—"; #dbg_gate="—"; #dbg_conds="—";
+dbg_last_noteon_status=-1; dbg_last_noteon_ch=-1; dbg_last_noteon_d1=-1; dbg_last_noteon_d2=-1;
+toggle_count_total=0; toggle_count_block=0;
+
+// state init
+i=0; loop(STATE_SIZE, state[i]=0; i+=1;);
+first_ready = 0;   // first NOTE ON will force-clear window once
+
+// -------------------------
+// Full color table (0..127) in 0xRRGGBB
+// -------------------------
 color[0]=0x000000;  color[1]=0x1E1E1E;  color[2]=0x7F7F7F;  color[3]=0xFFFFFF;  color[4]=0xFF4C4C;
 color[5]=0xFF0000;  color[6]=0x590000;  color[7]=0x190000;  color[8]=0xFFBD6C;  color[9]=0xFF5400;
 color[10]=0x591D00; color[11]=0x271B00; color[12]=0xFFFF4C; color[13]=0xFFFF00; color[14]=0x595900;
@@ -57,233 +77,263 @@ color[120]=0xA00000; color[121]=0x350000; color[122]=0x1AD000; color[123]=0x0742
 color[125]=0x3F3100; color[126]=0xB35F00; color[127]=0x4B1502;
 
 // -------------------------
-// Simple log state (like your reference script)
+// Helper: send OFF to hardware pad id (0..63) via SysEx
 // -------------------------
-// IN
-last_in_status=-1; last_in_ch=-1; last_in_d1=-1; last_in_d2=-1;
-// Note shift
-last_shift_orig=-1; last_shift_amt=0; last_shift_new=-1;
-// Toggle
-last_pad_index=-1; last_toggle_state=-1; last_note_after_bank=-1;
-// Color
-last_color_idx=-1; last_rgb=-1; last_R=-1; last_G=-1; last_B=-1; last_Rlsb=-1; last_Glsb=-1; last_Blsb=-1;
-// OUT SysEx (store last frame)
-syxN=16; syx0=0;syx1=0;syx2=0;syx3=0;syx4=0;syx5=0;syx6=0;syx7=0;syx8=0;syx9=0;syx10=0;syx11=0;syx12=0;syx13=0;syx14=0;syx15=0;
+function send_pad_off(off, pid)(
+  sysex[0]=$xF0; sysex[1]=$x47; sysex[2]=$x7F; sysex[3]=$x4F; sysex[4]=$x24;
+  sysex[5]=$x00; sysex[6]=$x08;
+  sysex[7]=pid & $x7F; sysex[8]=pid & $x7F;
+  sysex[9]=0; sysex[10]=0; sysex[11]=0; sysex[12]=0; sysex[13]=0; sysex[14]=0;
+  sysex[15]=$xF7;
+  midisend_buf(off, sysex, 16);
+  syxN=16;
+  syx0=sysex[0]; syx1=sysex[1]; syx2=sysex[2]; syx3=sysex[3]; syx4=sysex[4];
+  syx5=sysex[5]; syx6=sysex[6]; syx7=sysex[7]; syx8=sysex[8]; syx9=sysex[9];
+  syx10=sysex[10]; syx11=sysex[11]; syx12=sysex[12]; syx13=sysex[13]; syx14=sysex[14]; syx15=sysex[15];
+);
 
 // -------------------------
-// @block — react to Note On > 0 on selected channel; SysEx-only OUT
+// @block — toggle only on NOTE ON > 0; reset on CC120/123; NO THRU
 // -------------------------
 @block
-while ( midirecv(offset, msg1, msg2, msg3) ?
-(
+toggle_count_block = 0;
+
+while (midirecv(offset, msg1, msg2, msg3)) (
   status = msg1 & $xF0;
-  ch     = (msg1 & $x0F);
-  d1 =  msg2      & 0x7F; // note/cc
-  d2 =  msg3      & 0x7F; // vel/value
+  in_ch  = msg1 & $x0F;
+  d1 = msg2 & $x7F;   // note/cc
+  d2 = msg3 & $x7F;   // velocity/value
 
-  // IN log (like ref script)
-  last_in_status=status; last_in_ch=ch; last_in_d1=d1; last_in_d2=d2;
+  // IN log
+  last_in_status=status; last_in_ch=in_ch; last_in_d1=d1; last_in_d2=d2;
 
-  // Only NoteOn with vel>0 on the selected input channel
-  reacts = ( (slider4 == ch) ? 1 : 0 ); // slider4 is 0..15 == Ch1..Ch16 (ch is 0..15)
-  (status==0x90) && (d2>0) && reacts ? (
+  // Event label
+  (status==$x90)?strcpy(#dbg_event,"Event: NOTE ON")
+  : (status==$x80)?strcpy(#dbg_event,"Event: NOTE OFF")
+  : (status==$xB0)?strcpy(#dbg_event,"Event: CC")
+  : sprintf(#dbg_event,"Event: 0x%02X",status);
 
-    // Note Shift
-    last_shift_orig = d1;
-    last_shift_amt  = slider5|0;
-    note = last_shift_orig + last_shift_amt;
-    note < 0 ? note = 0 : note > 127 ? note = 127;
-    last_shift_new = note;
+  // Remember latest NOTE ON
+  (status==$x90) ? (
+    dbg_last_noteon_status = status;
+    dbg_last_noteon_ch     = in_ch;
+    dbg_last_noteon_d1     = d1;
+    dbg_last_noteon_d2     = d2;
+  );
 
-    // Bank range (16 pads)
-    bank_offset = slider1 * 16;
-    (note >= bank_offset) && (note < bank_offset + 16) ? (
-
-      pad_index = note - bank_offset;
-      slider2   = pad_index + bank_offset;       // show 0..63 if your mapping uses that
-      last_pad_index = pad_index;
-      last_note_after_bank = note;
-
-      // Toggle state per pad
-      val = pad_index == 0 ? pad0 :
-            pad_index == 1 ? pad1 :
-            pad_index == 2 ? pad2 :
-            pad_index == 3 ? pad3 :
-            pad_index == 4 ? pad4 :
-            pad_index == 5 ? pad5 :
-            pad_index == 6 ? pad6 :
-            pad_index == 7 ? pad7 :
-            pad_index == 8 ? pad8 :
-            pad_index == 9 ? pad9 :
-            pad_index == 10 ? pad10 :
-            pad_index == 11 ? pad11 :
-            pad_index == 12 ? pad12 :
-            pad_index == 13 ? pad13 :
-            pad_index == 14 ? pad14 :
-            pad_index == 15 ? pad15 : 0;
-
-      new_val = val ? 0 : 1;
-      last_toggle_state = new_val;
-
-      // Store back
-      pad_index == 0  ? pad0  = new_val :
-      pad_index == 1  ? pad1  = new_val :
-      pad_index == 2  ? pad2  = new_val :
-      pad_index == 3  ? pad3  = new_val :
-      pad_index == 4  ? pad4  = new_val :
-      pad_index == 5  ? pad5  = new_val :
-      pad_index == 6  ? pad6  = new_val :
-      pad_index == 7  ? pad7  = new_val :
-      pad_index == 8  ? pad8  = new_val :
-      pad_index == 9  ? pad9  = new_val :
-      pad_index == 10 ? pad10 = new_val :
-      pad_index == 11 ? pad11 = new_val :
-      pad_index == 12 ? pad12 = new_val :
-      pad_index == 13 ? pad13 = new_val :
-      pad_index == 14 ? pad14 = new_val :
-      pad_index == 15 ? pad15 = new_val;
-
-      // Color from palette
-      rgb = color[slider3];
-      R = (rgb & 0xFF0000) >> 16;
-      G = (rgb & 0x00FF00) >> 8;
-      B = (rgb & 0x0000FF);
-
-      sysexR = R * 127 / 255;
-      sysexG = G * 127 / 255;
-      sysexB = B * 127 / 255;
-
-      last_color_idx = slider3|0;
-      last_rgb = rgb;
-      last_R = R; last_G = G; last_B = B;
-      last_Rlsb = sysexR; last_Glsb = sysexG; last_Blsb = sysexB;
-
-      // Build SysEx frame (APC Mini mk2 RGB lighting)
-      sysex[0] = 0xF0;
-      sysex[1] = 0x47; // Manufacturer
-      sysex[2] = 0x7F; // Device ID (broadcast)
-      sysex[3] = 0x4F; // Product model ID
-      sysex[4] = 0x24; // RGB Color Lighting
-      sysex[5] = 0x00; // length MSB
-      sysex[6] = 0x08; // length LSB for 1 pad
-      sysex[7] = note; // start pad
-      sysex[8] = note; // end pad
-
-      (new_val == 1) ? (
-        sysex[9]  = 0;          sysex[10] = sysexR;
-        sysex[11] = 0;          sysex[12] = sysexG;
-        sysex[13] = 0;          sysex[14] = sysexB;
-      ) : (
-        sysex[9]  = 0;          sysex[10] = 0;
-        sysex[11] = 0;          sysex[12] = 0;
-        sysex[13] = 0;          sysex[14] = 0;
-      );
-
-      sysex[15] = 0xF7;
-
-      // Send ONLY SysEx
-      midisend_buf(offset, sysex, sysex_len);
-
-      // Store last SysEx frame for OUT log
-      syxN = sysex_len;
-      syx0=sysex[0]; syx1=sysex[1]; syx2=sysex[2]; syx3=sysex[3]; syx4=sysex[4];
-      syx5=sysex[5]; syx6=sysex[6]; syx7=sysex[7]; syx8=sysex[8]; syx9=sysex[9];
-      syx10=sysex[10]; syx11=sysex[11]; syx12=sysex[12]; syx13=sysex[13]; syx14=sysex[14]; syx15=sysex[15];
+  // RESET on CC 120/123 for selected channel
+  (status==$xB0) && (in_ch==slider4) ? (
+    (d1==120) || (d1==123) ? (
+      i=0; loop(STATE_SIZE, state[i]=0; i+=1;);
+      last_pad_index=-1; last_toggle_state=-1;
+      pid=0; loop(64, send_pad_off(offset, pid); pid+=1;);
+      last_reset_cc=d1; last_reset_ch=in_ch;
+      state_on_count=0; i=0; loop(STATE_SIZE, state_on_count += (state[i]?1:0); i+=1;);
+      first_ready = 1; // after reset got at least one event
     );
   );
 
-  // Do NOT pass anything thru
-  1;
-) : 0 );
+  // 16-pad window defined by slider1 (offset)
+  offset16 = slider1|0;                 // start note ID
+  slot     = d1 - offset16;             // index within window
+  in_range = (slot>=0) && (slot<SLOTS); // 0..15
+
+  cond_noteon  = (status==$x90);
+  cond_velpos  = (d2>0);
+  cond_channel = (in_ch==slider4);
+
+  sprintf(#dbg_conds,"Gate conds: noteon=%d velpos=%d channel_ok=%d in_range=%d",
+          cond_noteon?1:0, cond_velpos?1:0, cond_channel?1:0, in_range?1:0);
+
+  last_offset    = offset16;
+  last_slot      = slot;
+  last_in_range  = in_range ? 1 : 0;
+
+  (cond_noteon && cond_velpos && cond_channel && in_range) ? (
+
+    // one-time safety clear on very first NoteOn after load/compile
+    (first_ready == 0) ? (
+      i=0; loop(STATE_SIZE, state[i]=0; i+=1;);
+      first_ready = 1;
+    );
+
+    // READ (normalized)
+    val = (state[slot] != 0) ? 1 : 0;
+    last_val_before = val;
+
+    // TOGGLE
+    newstate = val ? 0 : 1;
+    last_newstate = newstate;
+
+    // WRITE (normalized)
+    state[slot] = (newstate != 0) ? 1 : 0;
+    last_after_write = state[slot];
+
+    // counters
+    toggle_count_total += 1;
+    toggle_count_block += 1;
+
+    // logs
+    last_toggle_state = newstate; last_pad_index = slot; last_pad_id = d1; slider2 = d1;
+
+    // recompute ON count
+    state_on_count=0; i=0; loop(STATE_SIZE, state_on_count += (state[i]?1:0); i+=1;);
+
+    // Color -> RGB (0..255) -> 0..127
+    rgb = color[slider3];
+    R = (rgb & $xFF0000) >> 16;  G = (rgb & $x00FF00) >> 8;  B = (rgb & $x0000FF);
+    sysexR = R * 127 / 255; sysexG = G * 127 / 255; sysexB = B * 127 / 255;
+    last_color_idx=slider3; last_rgb=rgb; last_R=R; last_G=G; last_B=B;
+    last_Rlsb=sysexR; last_Glsb=sysexG; last_Blsb=sysexB;
+
+    // SysEx frame (Akai APC Mini mk2 RGB: 47 7F 4F 24)
+    sysex[0]=$xF0; sysex[1]=$x47; sysex[2]=$x7F; sysex[3]=$x4F; sysex[4]=$x24;
+    sysex[5]=$x00; sysex[6]=$x08;            // 8 data bytes
+    sysex[7]=d1 & $x7F; sysex[8]=d1 & $x7F;  // start/end pad ID (absolute)
+
+    (newstate == 1) ? (
+      // Use selected color for ON state
+      sysex[9]=0; sysex[10]=sysexR;
+      sysex[11]=0; sysex[12]=sysexG;
+      sysex[13]=0; sysex[14]=sysexB;
+      sysex[15]=$xF7;
+      midisend_buf(offset, sysex, sysex_len);
+    ) : (
+      // Off state
+      sysex[9]=0; sysex[10]=0; sysex[11]=0; sysex[12]=0; sysex[13]=0; sysex[14]=0; sysex[15]=$xF7;
+      midisend_buf(offset, sysex, sysex_len);
+    );
+
+    syxN=sysex_len;
+    syx0=sysex[0]; syx1=sysex[1]; syx2=sysex[2]; syx3=sysex[3]; syx4=sysex[4];
+    syx5=sysex[5]; syx6=sysex[6]; syx7=sysex[7]; syx8=sysex[8]; syx9=sysex[9];
+    syx10=sysex[10]; syx11=sysex[11]; syx12=sysex[12]; syx13=sysex[13]; syx14=sysex[14]; syx15=sysex[15];
+
+    // Note Shift (info-only)
+    last_shift_orig = d1; last_shift_amt = slider5;
+    shifted_note = last_shift_orig + last_shift_amt;
+    (shifted_note<0)?shifted_note=0:(shifted_note>127)?shifted_note=127;
+    last_shift_new = shifted_note;
+
+    strcpy(#dbg_gate, "Gate: TOGGLED");
+
+  ) : (
+    (!cond_noteon)   ? strcpy(#dbg_gate, "Gate: ignored — not NOTE ON")
+    : (!cond_velpos) ? strcpy(#dbg_gate, "Gate: ignored — vel=0")
+    : (!cond_channel)? strcpy(#dbg_gate, "Gate: ignored — other channel")
+    : (!in_range)    ? strcpy(#dbg_gate, "Gate: ignored — note outside 16-slot window")
+    : strcpy(#dbg_gate, "Gate: —");
+  );
+
+  // swallow everything (SysEx-only out)
+);
 
 // -------------------------
-// @gfx — simple header + logs (left aligned), color preview
+// @gfx — logs + color preview + 4×4 grid
 // -------------------------
 @gfx
-margin=10; pad=6;
+margin=10; lineh=18;
 gfx_set(0,0,0); gfx_rect(0,0,gfx_w,gfx_h);
 gfx_setfont(1,"",14);
 
 // Header
-sprintf(#hdr,"APC Mini mk2 RGB Toggle  |  Bank:%d  InCh:%d  ColorIdx:%d",
-        slider1+1, slider4+1, slider3);
+sprintf(#hdr,"APC Mini mk2 RGB Toggle | Offset:%d..%d  InCh:%d  ColorIdx:%d",
+        slider1, slider1+15, slider4+1, slider3);
 gfx_r=gfx_g=gfx_b=1; gfx_x=margin; gfx_y=margin; gfx_drawstr(#hdr);
 
-// Color preview (top-right)
+// Color preview
 col = color[slider3];
-r = ((col>>16)&0xFF)/255.0;
-g = ((col>>8)&0xFF)/255.0;
-b = (col&0xFF)/255.0;
-box = 60; bx = gfx_w - margin - box; by = margin;
-gfx_set(r,g,b); gfx_rect(bx,by,box,box);
-gfx_set(1,1,1);
+pr = ((col>>16)&255)/255.0; pg = ((col>>8)&255)/255.0; pb = (col&255)/255.0;
+box=60; bx=gfx_w - margin - box; by=margin;
+gfx_set(pr,pg,pb); gfx_rect(bx,by,box,box); gfx_set(1,1,1);
 
-// IN log (like ref script)
+// IN log
 (last_in_status>=0)?
 (
   #it="";
-  (last_in_status==0x80)?strcpy(#it,"IN: NoteOff")
-  : (last_in_status==0x90)?strcpy(#it,"IN: NoteOn")
-  : (last_in_status==0xB0)?strcpy(#it,"IN: CC")
-  : (last_in_status==0xE0)?strcpy(#it,"IN: Pitch")
+  (last_in_status==$x80)?strcpy(#it,"IN: NoteOff")
+  : (last_in_status==$x90)?strcpy(#it,"IN: NoteOn")
+  : (last_in_status==$xB0)?strcpy(#it,"IN: CC")
   : sprintf(#it,"IN: 0x%02X", last_in_status);
-
   sprintf(#inln,"%s  Ch %d  d1=%3d  d2=%3d", #it, last_in_ch+1, last_in_d1, last_in_d2);
-) : (
-  strcpy(#inln,"IN: —")
-);
-gfx_x=margin; gfx_y=margin+20; gfx_drawstr(#inln);
+) : ( strcpy(#inln,"IN: —") );
+gfx_x=margin; gfx_y=margin+22; gfx_drawstr(#inln);
 
-// NoteShift line
-(last_shift_orig>=0)?
-(
-  sprintf(#shiftln,"NoteShift: original=%d  +  shift=%d  =>  shifted=%d",
-          last_shift_orig, last_shift_amt, last_shift_new);
-) : (
-  strcpy(#shiftln,"NoteShift: —")
-);
-gfx_x=margin; gfx_y=margin+20+16; gfx_drawstr(#shiftln);
+// Diagnostics
+gfx_x=margin; gfx_y=margin+22+lineh; gfx_drawstr(#dbg_event);
+gfx_x=margin; gfx_y=margin+22+2*lineh; gfx_drawstr(#dbg_gate);
+gfx_x=margin; gfx_y=margin+22+3*lineh; gfx_drawstr(#dbg_conds);
+(dbg_last_noteon_status>=0)?
+( sprintf(#no,"Last NOTE ON seen: Ch %d  d1=%d  d2=%d", dbg_last_noteon_ch+1, dbg_last_noteon_d1, dbg_last_noteon_d2) )
+: ( strcpy(#no,"Last NOTE ON seen: —") );
+gfx_x=margin; gfx_y=margin+22+4*lineh; gfx_drawstr(#no);
 
-// Last toggle line
-(last_pad_index>=0)?
-(
-  sprintf(#tglln,"Last toggle: Bank %d  Pad %d  Note %d  -> %s",
-          slider1+1, last_pad_index, last_note_after_bank, (last_toggle_state?"ON":"OFF"));
-) : (
-  strcpy(#tglln,"Last toggle: —")
-);
-gfx_x=margin; gfx_y=margin+20+16+16; gfx_drawstr(#tglln);
+// Toggle math + counters
+sprintf(#st2,"Toggle math: val(before)=%d  newstate=%d  after_write=%d  | toggles: block=%d total=%d",
+        last_val_before, last_newstate, last_after_write, toggle_count_block, toggle_count_total);
+gfx_x=margin; gfx_y=margin+22+5*lineh; gfx_drawstr(#st2);
 
-// Color line
-(last_color_idx>=0)?
-(
-  sprintf(#col1,"Color: idx=%d  HEX:#%06X  R:%3d G:%3d B:%3d  (LSB:%3d,%3d,%3d)",
-          last_color_idx, last_rgb, last_R, last_G, last_B, last_Rlsb, last_Glsb, last_Blsb);
-) : (
-  strcpy(#col1,"Color: —")
-);
-gfx_x=margin; gfx_y=margin+20+16+16+16; gfx_drawstr(#col1);
-
-// OUT: SysEx summary
-(syxN>0)?
-(
-  strcpy(#ot,"OUT: SysEx RGB Lighting  len=16");
-) : (
-  strcpy(#ot,"OUT: —")
-);
-gfx_x=margin; gfx_y=margin+20+16+16+16+16; gfx_drawstr(#ot);
-
-// OUT: SysEx hex line
+// OUT SysEx
+(syxN==16)? ( strcpy(#out,"OUT: SysEx RGB Lighting  len=16") ) : ( strcpy(#out,"OUT: —") );
+gfx_x=margin; gfx_y=margin+22+6*lineh; gfx_drawstr(#out);
 (syxN==16)?
 (
-  sprintf(#syx,
-    "SYSEX: %02X %02X %02X %02X  %02X  %02X %02X  %02X %02X  %02X %02X %02X %02X %02X %02X  %02X",
-    syx0&0xFF, syx1&0xFF, syx2&0xFF, syx3&0xFF, syx4&0xFF, syx5&0xFF, syx6&0xFF,
-    syx7&0xFF, syx8&0xFF, syx9&0xFF, syx10&0xFF, syx11&0xFF, syx12&0xFF, syx13&0xFF, syx14&0xFF, syx15&0xFF
+  sprintf(#syx,"SYSEX: %02X %02X %02X %02X  %02X  %02X %02X  %02X %02X  %02X %02X %02X %02X %02X %02X  %02X",
+    syx0&255, syx1&255, syx2&255, syx3&255, syx4&255, syx5&255, syx6&255,
+    syx7&255, syx8&255, syx9&255, syx10&255, syx11&255, syx12&255, syx13&255, syx14&255, syx15&255 )
+) : ( strcpy(#syx,"SYSEX: —") );
+gfx_x=margin; gfx_y=margin+22+7*lineh; gfx_drawstr(#syx);
+
+// State dump
+#dump=""; i=0; loop(STATE_SIZE, v=((state[i]!=0)?1:0); (i==0)?sprintf(#dump,"%d",v):sprintf(#dump,"%s %d",#dump,v); i+=1;);
+sprintf(#sd,"state[16 @%d]: %s   (ON:%d)   last_pad_index=%d   last_pad_id=%d   offset=%d",
+        STATE_BASE, #dump, state_on_count, last_pad_index, last_pad_id, last_offset);
+gfx_x=margin; gfx_y=margin+22+8*lineh; gfx_drawstr(#sd);
+
+// 4×4 GRID (labels show absolute note IDs: offset..offset+15)
+top = margin + 22 + 9*lineh + 6;
+cols=4; rows=4;
+avail_w = max(100, gfx_w - 2*margin);
+avail_h = max(100, gfx_h - top - margin);
+cell_w = floor(avail_w/cols);
+cell_h = floor(avail_h/rows);
+grid_w = cell_w*cols; grid_h = cell_h*rows;
+grid_x0 = margin + floor((avail_w - grid_w) * 0.5);
+grid_y0 = top;
+
+on_r = pr * 0.9; on_g = pg * 0.9; on_b = pb * 0.9;
+
+i=0; loop(STATE_SIZE,
+  row = floor(i/cols);
+  col = i % cols;
+  gx = grid_x0 + col * cell_w;
+  gy = grid_y0 + row * cell_h;
+
+  on = (state[i]!=0) ? 1 : 0;
+  (on ? gfx_set(on_r,on_g,on_b) : gfx_set(0.12,0.12,0.12));
+  gfx_rect(gx,gy,cell_w-2,cell_h-2);
+
+  gfx_set(0.6,0.6,0.6);
+  gfx_line(gx,gy,gx+cell_w-2,gy);
+  gfx_line(gx,gy,gx,gy+cell_h-2);
+  gfx_line(gx+cell_w-2,gy,gx+cell_w-2,gy+cell_h-2);
+  gfx_line(gx,gy+cell_h-2,gx+cell_w-2,gy+cell_h-2);
+
+  (last_pad_index == i) ? (
+    gfx_set(1,1,1);
+    gfx_line(gx+1,gy+1,gx+cell_w-3,gy+1);
+    gfx_line(gx+1,gy+1,gx+1,gy+cell_h-3);
+    gfx_line(gx+cell_w-3,gy+1,gx+cell_w-3,gy+cell_h-3);
+    gfx_line(gx+1,gy+cell_h-3,gx+cell_w-3,gy+cell_h-3);
   );
-) : (
-  strcpy(#syx,"SYSEX: —")
+
+  gfx_set(1,1,1);
+  gfx_x = gx + 6; gfx_y = gy + 6;
+  abs_id = (slider1|0) + i;
+  sprintf(#lab,"P%02d  ID %02d", i, abs_id);
+  gfx_drawstr(#lab);
+
+  i+=1;
 );
-gfx_x=margin; gfx_y=margin+20+16+16+16+16+16; gfx_drawstr(#syx);
 
 gfx_dirty=1;
