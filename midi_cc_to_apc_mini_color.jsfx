@@ -111,6 +111,10 @@ while (
         last_toggle_slot = slot;
         last_toggle_newstate = newstate;
 
+        // map incoming pad id 0..127 -> 0..63 for RGB SysEx
+        pad_in  = d1 & 0x7F;
+        pad_rgb = pad_in & 0x3F; // (>=64) wrap to 0..63
+
         (newstate == 1) ? (
           rgb   = color[color_idx];
           R     = (rgb & 0xFF0000) >> 16;
@@ -120,8 +124,8 @@ while (
           sysexG = G * 127 / 255;
           sysexB = B * 127 / 255;
 
-          sysex[7] = d1 & 0x7F;
-          sysex[8] = d1 & 0x7F;
+          sysex[7] = pad_rgb;
+          sysex[8] = pad_rgb;
           sysex[9]  = 0;         sysex[10] = sysexR;
           sysex[11] = 0;         sysex[12] = sysexG;
           sysex[13] = 0;         sysex[14] = sysexB;
@@ -129,23 +133,11 @@ while (
 
           midisend_buf(offset, sysex, 16);
         ) : (
-          rgb   = color[color_idx];
-          R     = (rgb & 0xFF0000) >> 16;
-          G     = (rgb & 0x00FF00) >> 8;
-          B     = (rgb & 0x0000FF);
-          sysexR = R * 127 / 255;
-          sysexG = G * 127 / 255;
-          sysexB = B * 127 / 255;
-
-          sysex[7] = d1 & 0x7F;
-          sysex[8] = d1 & 0x7F;
-          sysex[9]  = 0;
-          sysex[9]  = 0;
-          sysex[10] = 0;
-          sysex[11] = 0;
-          sysex[12] = 0;
-          sysex[13] = 0;
-          sysex[14] = 0;
+          sysex[7] = pad_rgb;
+          sysex[8] = pad_rgb;
+          sysex[9]  = 0; sysex[10] = 0;
+          sysex[11] = 0; sysex[12] = 0;
+          sysex[13] = 0; sysex[14] = 0;
           sysex[15] = 0xF7;
 
           midisend_buf(offset, sysex, 16);
