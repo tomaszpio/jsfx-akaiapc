@@ -1,4 +1,4 @@
-  desc:APC Pad Blinker (Sync to Transport)
+desc: TP: APC Pad Blinker (Sync to Transport)
 
 slider1:0<0,77,1>Pad MIDI Note (0-63)
 slider2:1<0,1,1{Off,On}>Enable Blinking
