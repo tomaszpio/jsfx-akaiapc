@@ -2,6 +2,7 @@
 
 slider1:0<0,77,1>Pad MIDI Note (0-63)
 slider2:1<0,1,1{Off,On}>Enable Blinking
+slider3:3<0,127,1>Pad Color (0-127)
 
 @init
 note = 0;
@@ -10,10 +11,12 @@ beat_timer = 0.0;
 is_on = 0;
 should_blink = 1;
 play_state = 0;
+color = 0;
 
 @slider
 note = slider1;
 should_blink = slider2;
+color = slider3;
 
 @block
 // Get current tempo from transport (in BPM)
@@ -33,8 +36,8 @@ velocity = 0;
     beat_timer >= interval ? (
       beat_timer -= interval;
       is_on = is_on == 0 ? 1 : 0;
-      velocity = is_on ? 122 : 0;
+      velocity = is_on ? color : 0;
       midisend(0, 0x96, note, velocity);
     );
   );
-); 
+);
