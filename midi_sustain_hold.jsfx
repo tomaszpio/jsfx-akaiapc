@@ -1,0 +1,86 @@
+desc: MIDI sustain hold - przytrzymuje wiele nut gdy pedał sustain (CC64) jest wciśnięty
+author: tomaszpio
+version: 1.0.0
+about:
+  Ten JSFX przechwytuje komunikaty Note Off gdy pedał sustain (CC64)
+  jest wciśnięty i trzyma nuty aż do zwolnienia pedału. Działa dla
+  wszystkich kanałów lub wybranego kanału (slider Channel).
+
+slider1:0<0,16,1>Channel (0=omni)
+
+in_pin:none
+out_pin:none
+
+@init
+i = 0;
+while (i < 128) (
+  held[i] = 0;
+  held_chan[i] = 0;
+  i += 1;
+);
+pedal_down = 0;
+
+@slider
+s1   = slider1|0;
+chan = s1 ? (s1 - 1) : -1; // -1 = omni
+
+@block
+// Przetwarzaj wszystkie przychodzące wiadomości MIDI
+while (midirecv(ts, msg, msg23)) (
+  status = msg & $xf0;
+  ch     = msg & $x0f;
+  d1     = msg23 & $xff;           // data1 (note lub CC number)
+  d2     = (msg23/256) & $xff;     // data2 (vel lub CC value)
+
+  in_chan = (chan < 0) || (ch == chan);
+
+  // Obsługa CC64 (sustain pedal)
+  status == $xb0 && d1 == 64 ? (
+    // przekaż dalej CC
+    midisend(ts, msg, msg23);
+
+    // pedale down/up
+    d2 >= 64 ? (
+      pedal_down = 1;
+    ) : (
+      // pedal up -> wyślij note-off dla wszystkich przetrzymywanych nut
+      pedal_down ? (
+        i = 0;
+        while (i < 128) (
+          held[i] ? (
+            midisend(ts, $x80 + held_chan[i], i);
+            held[i] = 0;
+            held_chan[i] = 0;
+          );
+          i += 1;
+        );
+        pedal_down = 0;
+      ) : (0);
+    );
+  ) : (
+    // Inne komunikaty — sprawdź czy to nota
+    is_note = (status == $x90) || (status == $x80);
+
+    is_note && in_chan ? (
+      // Note On (vel>0)
+      status == $x90 && d2 ? (
+        // zawsze przepuszczamy Note On
+        midisend(ts, msg, msg23);
+      ) : (
+        // Note Off (status 0x80) lub Note On z vel=0
+        // Jeżeli pedał wciśnięty -> przechowaj (zignoruj wysyłanie),
+        // w przeciwnym razie przekaż note-off dalej
+        pedal_down ? (
+          // zapamiętaj, że ta nuta jest przytrzymana przez pedał
+          held[d1] = 1;
+          held_chan[d1] = ch;
+        ) : (
+          midisend(ts, msg, msg23);
+        );
+      );
+    ) : (
+      // Wszystko inne przepuszczamy
+      midisend(ts, msg, msg23);
+    );
+  );
+);
