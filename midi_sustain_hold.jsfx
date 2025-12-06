@@ -73,8 +73,8 @@ while (midirecv(ts, msg, msg23)) (
     midisend(ts, msg, msg23);
 
     // Pedal down/up detection: CC value >=64 means pedal pressed
-    // Check if pedal was down and is now up
-    (pedal_down && d2 < 64) ? (
+    // First, check if we need to release held notes (pedal transitioning down)
+    (d2 < 64 && pedal_down) ? (
       // Pedal released -> send Note Off for all held notes
       i = 0;
       while (i < 128) (
@@ -87,13 +87,13 @@ while (midirecv(ts, msg, msg23)) (
         i += 1;
       );
       pedal_down = 0;
+    ) : (0);
+
+    // Then update pedal state for next time
+    d2 >= 64 ? (
+      pedal_down = 1;
     ) : (
-      // Update pedal state
-      d2 >= 64 ? (
-        pedal_down = 1;
-      ) : (
-        pedal_down = 0;
-      );
+      pedal_down = 0;
     );
   ) : (
     // Other messages — check for notes
