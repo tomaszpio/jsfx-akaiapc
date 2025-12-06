@@ -76,6 +76,9 @@ while (midirecv(ts, msg, msg23)) (
     // First, check if we need to release held notes (pedal transitioning down)
     (d2 < 64 && pedal_down) ? (
       // Pedal released -> send Note Off for all held notes
+      debug_mode ? (
+        midisend(0, 0xF0, 0);  // debug marker
+      ) : (0);
       i = 0;
       while (i < 128) (
         held[i] ? (
