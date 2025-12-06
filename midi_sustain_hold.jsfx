@@ -22,6 +22,8 @@ about:
     all held notes at once.
 
 slider1:0<0,16,1>Channel (0=omni)
+slider2:36<0,127,1>Low note
+slider3:84<0,127,1>High note
 
 in_pin:none
 out_pin:none
@@ -39,6 +41,17 @@ pedal_down = 0;
 s1   = slider1|0;
 chan = s1 ? (s1 - 1) : -1; // -1 = omni
 
+// Note range sliders
+low  = slider2|0;
+high = slider3|0;
+
+// If user sets Low > High, swap them
+low > high ? (
+  tmp  = low;
+  low  = high;
+  high = tmp;
+);
+
 @block
 // Process all incoming MIDI messages
 while (midirecv(ts, msg, msg23)) (
@@ -48,6 +61,7 @@ while (midirecv(ts, msg, msg23)) (
   d2     = (msg23/256) & $xff;   // data2 (velocity or CC value)
 
   in_chan = (chan < 0) || (ch == chan);
+  in_range = (d1 >= low) && (d1 <= high);
 
   // Handle sustain pedal (CC64)
   status == $xb0 && d1 == 64 ? (
@@ -83,10 +97,16 @@ while (midirecv(ts, msg, msg23)) (
       ) : (
         // Note Off (0x80) or Note On with vel=0
         // If pedal is down, store the note as held (suppress note-off).
-        // Otherwise forward the note-off.
+        // Otherwise forward the note-off. Only hold notes inside the
+        // configured range when pedal is down.
         pedal_down ? (
-          held[d1] = 1;
-          held_chan[d1] = ch;
+          in_range ? (
+            held[d1] = 1;
+            held_chan[d1] = ch;
+          ) : (
+            // outside range -> forward the note-off immediately
+            midisend(ts, msg, msg23);
+          );
         ) : (
           midisend(ts, msg, msg23);
         );
