@@ -123,8 +123,27 @@ while (midirecv(ts, msg, msg23)) (
         );
       );
     ) : (
-      // Forward everything else unchanged
-      midisend(ts, msg, msg23);
+      // Message is either:
+      // - a note on a different channel (check if it's a Note Off for a held note)
+      // - a non-note message
+      is_note ? (
+        // Note on different channel: still check if held
+        status == $x80 || (status == $x90 && d2 == 0) ? (
+          // This is a Note Off (either explicit 0x80 or Note On with vel=0)
+          held[d1] ? (
+            // suppress note-off for held notes even on other channels
+            0;
+          ) : (
+            midisend(ts, msg, msg23);
+          );
+        ) : (
+          // Note On on different channel - forward normally
+          midisend(ts, msg, msg23);
+        );
+      ) : (
+        // Non-note message - forward unchanged
+        midisend(ts, msg, msg23);
+      );
     );
   );
 );
