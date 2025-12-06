@@ -93,7 +93,14 @@ while (midirecv(ts, msg, msg23)) (
     is_note && in_chan ? (
       // Note On with velocity > 0: always forward
       status == $x90 && d2 ? (
+        // forward Note On
         midisend(ts, msg, msg23);
+        // If pedal is down and note is in range, mark this note as held
+        // so subsequent Note Offs will be suppressed until pedal release.
+        pedal_down && in_range ? (
+          held[d1] = 1;
+          held_chan[d1] = ch;
+        ) : (0);
       ) : (
         // Note Off (0x80) or Note On with vel=0
         // If pedal is down, store the note as held (suppress note-off).
