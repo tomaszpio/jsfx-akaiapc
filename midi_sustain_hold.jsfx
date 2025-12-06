@@ -33,9 +33,14 @@ i = 0;
 while (i < 128) (
   held[i] = 0;
   held_chan[i] = 0;
+  held_vel[i] = 0;
   i += 1;
 );
 pedal_down = 0;
+debug_mode = 1;
+low = 36;
+high = 84;
+prev_pedal_down = 0;
 
 @slider
 s1   = slider1|0;
@@ -70,6 +75,17 @@ while (midirecv(ts, msg, msg23)) (
 
     // Pedal down/up detection: CC value >=64 means pedal pressed
     d2 >= 64 ? (
+      // Pedal transitioning from up to down
+      !prev_pedal_down ? (
+        // Re-emit all currently held notes with their stored velocity
+        i = 0;
+        while (i < 128) (
+          held[i] ? (
+            midisend(ts, $x90 + held_chan[i], i | (held_vel[i] << 8));
+          );
+          i += 1;
+        );
+      ) : (0);
       pedal_down = 1;
     ) : (
       // Pedal released -> send Note Off for all held notes
@@ -80,12 +96,14 @@ while (midirecv(ts, msg, msg23)) (
             midisend(ts, $x80 + held_chan[i], i);
             held[i] = 0;
             held_chan[i] = 0;
+            held_vel[i] = 0;
           );
           i += 1;
         );
         pedal_down = 0;
       ) : (0);
     );
+    prev_pedal_down = d2 >= 64 ? 1 : 0;
   ) : (
     // Other messages — check for notes
     is_note = (status == $x90) || (status == $x80);
@@ -98,6 +116,7 @@ while (midirecv(ts, msg, msg23)) (
         in_range ? (
           held[d1] = 1;
           held_chan[d1] = ch;
+          held_vel[d1] = d2;
         ) : (0);
       ) : (
         // Note Off (0x80) or Note On with vel=0:
@@ -121,47 +140,51 @@ while (midirecv(ts, msg, msg23)) (
 @gfx 800 200
 // Simple UI to visualize held notes and pedal state
 gfx_clear = 0x2a2a2a;  // dark background
+gfx_set(1, 1, 1);
 
-// Draw title
+// Draw title and debug info
 gfx_x = 10;
 gfx_y = 10;
 gfx_setfont(1, "Arial", 16, 'b');
-gfx_drawstr("Held Notes:");
+gfx_drawstr("Held Notes (Range: " + low + "-" + high + "):");
 
-// Draw held notes as a piano-like display (simplified)
-gfx_y = 40;
+gfx_setfont(1, "Arial", 11);
+gfx_x = 10;
+gfx_y = 32;
+gfx_drawstr("Channel: " + (chan < 0 ? "Omni" : sprintf(#, "%d", chan+1)));
+
+// Count and draw held notes
+gfx_y = 50;
 gfx_x = 10;
 gfx_setfont(1, "Arial", 12);
 
 note_count = 0;
-i = low;
-while (i <= high) (
+held_list = "";
+i = 0;
+while (i < 128) (
   held[i] ? (
-    (note_count % 16 == 0) ? (
-      gfx_x = 10;
-      gfx_y += 20;
-    ) : (0);
-    
-    // Draw held note
-    gfx_rect(gfx_x, gfx_y, 40, 18, 1);  // border
-    gfx_setfont(1, "Arial", 10);
-    gfx_drawstr(sprintf(#, "Note %d", i));
-    gfx_x += 50;
+    held_list = held_list + (note_count > 0 ? ", " : "") + sprintf(#, "%d", i);
     note_count += 1;
   );
   i += 1;
 );
 
+// Display held notes info
+gfx_drawstr("Count: " + note_count);
+gfx_x = 10;
+gfx_y = 68;
+gfx_drawstr("Notes: " + (note_count > 0 ? held_list : "(none)"));
+
 // Draw pedal state
 gfx_x = 10;
-gfx_y = 170;
+gfx_y = 100;
 gfx_setfont(1, "Arial", 14, 'b');
 pedal_down ? (
   gfx_set(0.2, 1.0, 0.2);  // green for pedal down
-  gfx_drawstr("PEDAL: ON");
+  gfx_drawstr("PEDAL: ON (>=64)");
 ) : (
   gfx_set(1.0, 0.2, 0.2);  // red for pedal up
-  gfx_drawstr("PEDAL: OFF");
+  gfx_drawstr("PEDAL: OFF (<64)");
 );
 
 gfx_set(1, 1, 1);  // reset to white
