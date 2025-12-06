@@ -1,10 +1,25 @@
-desc: MIDI sustain hold - przytrzymuje wiele nut gdy pedał sustain (CC64) jest wciśnięty
+desc: MIDI sustain hold - hold multiple notes while sustain pedal (CC64) is pressed
 author: tomaszpio
 version: 1.0.0
 about:
-  Ten JSFX przechwytuje komunikaty Note Off gdy pedał sustain (CC64)
-  jest wciśnięty i trzyma nuty aż do zwolnienia pedału. Działa dla
-  wszystkich kanałów lub wybranego kanału (slider Channel).
+  This JSFX plugin implements a sustain-hold behaviour similar to an
+  instrument sustain pedal: when sustain (MIDI CC64) is held (value >= 64),
+  incoming Note Off messages are intercepted and the notes are kept (held).
+  When the pedal is released (CC64 < 64), all previously held notes are
+  released (Note Off messages are sent).
+
+  FEATURES:
+  - Works in Omni mode (Channel = 0) or on a single MIDI channel (1..16).
+  - Holds any number of notes simultaneously while sustain is pressed.
+  - CC64 messages and all non-note messages are forwarded unchanged.
+
+  USAGE:
+  - Put this JSFX between your MIDI input and instrument in REAPER so it
+    can intercept MIDI and forward events to the instrument.
+  - Use slider `Channel` to select 0 (omni) or a single MIDI channel.
+  - Press and hold your sustain pedal (CC64 >= 64) — Note Offs will be
+    suppressed and notes will keep sounding. Release the pedal to release
+    all held notes at once.
 
 slider1:0<0,16,1>Channel (0=omni)
 
@@ -25,25 +40,25 @@ s1   = slider1|0;
 chan = s1 ? (s1 - 1) : -1; // -1 = omni
 
 @block
-// Przetwarzaj wszystkie przychodzące wiadomości MIDI
+// Process all incoming MIDI messages
 while (midirecv(ts, msg, msg23)) (
-  status = msg & $xf0;
-  ch     = msg & $x0f;
-  d1     = msg23 & $xff;           // data1 (note lub CC number)
-  d2     = (msg23/256) & $xff;     // data2 (vel lub CC value)
+  status = msg & $xf0;           // message type (note on/off, CC, ...)
+  ch     = msg & $x0f;           // MIDI channel 0..15
+  d1     = msg23 & $xff;         // data1 (note number or CC number)
+  d2     = (msg23/256) & $xff;   // data2 (velocity or CC value)
 
   in_chan = (chan < 0) || (ch == chan);
 
-  // Obsługa CC64 (sustain pedal)
+  // Handle sustain pedal (CC64)
   status == $xb0 && d1 == 64 ? (
-    // przekaż dalej CC
+    // Forward the CC message unchanged
     midisend(ts, msg, msg23);
 
-    // pedale down/up
+    // Pedal down/up detection: CC value >=64 means pedal pressed
     d2 >= 64 ? (
       pedal_down = 1;
     ) : (
-      // pedal up -> wyślij note-off dla wszystkich przetrzymywanych nut
+      // Pedal released -> send Note Off for all held notes
       pedal_down ? (
         i = 0;
         while (i < 128) (
@@ -58,20 +73,18 @@ while (midirecv(ts, msg, msg23)) (
       ) : (0);
     );
   ) : (
-    // Inne komunikaty — sprawdź czy to nota
+    // Other messages — check for notes
     is_note = (status == $x90) || (status == $x80);
 
     is_note && in_chan ? (
-      // Note On (vel>0)
+      // Note On with velocity > 0: always forward
       status == $x90 && d2 ? (
-        // zawsze przepuszczamy Note On
         midisend(ts, msg, msg23);
       ) : (
-        // Note Off (status 0x80) lub Note On z vel=0
-        // Jeżeli pedał wciśnięty -> przechowaj (zignoruj wysyłanie),
-        // w przeciwnym razie przekaż note-off dalej
+        // Note Off (0x80) or Note On with vel=0
+        // If pedal is down, store the note as held (suppress note-off).
+        // Otherwise forward the note-off.
         pedal_down ? (
-          // zapamiętaj, że ta nuta jest przytrzymana przez pedał
           held[d1] = 1;
           held_chan[d1] = ch;
         ) : (
@@ -79,7 +92,7 @@ while (midirecv(ts, msg, msg23)) (
         );
       );
     ) : (
-      // Wszystko inne przepuszczamy
+      // Forward everything else unchanged
       midisend(ts, msg, msg23);
     );
   );
