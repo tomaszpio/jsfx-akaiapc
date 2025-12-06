@@ -36,6 +36,7 @@ while (i < 128) (
   i += 1;
 );
 pedal_down = 0;
+debug_mode = 1; // set to 0 to disable debug output
 
 @slider
 s1   = slider1|0;
@@ -71,12 +72,21 @@ while (midirecv(ts, msg, msg23)) (
     // Pedal down/up detection: CC value >=64 means pedal pressed
     d2 >= 64 ? (
       pedal_down = 1;
+      debug_mode ? (
+        midisend(0, 0xF0 | 0x0E, 0);
+      ) : (0);
     ) : (
       // Pedal released -> send Note Off for all held notes
       pedal_down ? (
+        debug_mode ? (
+          midisend(0, 0xF0 | 0x0E, 0);
+        ) : (0);
         i = 0;
         while (i < 128) (
           held[i] ? (
+            debug_mode ? (
+              midisend(0, 0xF0 | 0x0E, 0);
+            ) : (0);
             midisend(ts, $x80 + held_chan[i], i);
             held[i] = 0;
             held_chan[i] = 0;
@@ -98,6 +108,9 @@ while (midirecv(ts, msg, msg23)) (
         in_range ? (
           held[d1] = 1;
           held_chan[d1] = ch;
+          debug_mode ? (
+            midisend(0, 0xF0 | 0x0E, 0);
+          ) : (0);
         ) : (0);
       ) : (
         // Note Off (0x80) or Note On with vel=0:
@@ -106,6 +119,9 @@ while (midirecv(ts, msg, msg23)) (
         held[d1] ? (
           // suppress note-off while it's held; keep held state until
           // sustain pedal off triggers release of all held notes.
+          debug_mode ? (
+            midisend(0, 0xF0 | 0x0E, 0);
+          ) : (0);
           0;
         ) : (
           midisend(ts, msg, msg23);
