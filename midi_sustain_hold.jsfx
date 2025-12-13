@@ -1,11 +1,11 @@
 desc: MIDI sustain hold - hold multiple notes while sustain pedal (CC64) is pressed
 author: tomaszpio
-version: 1.0.0
+version: 1.1.0
 about:
   This JSFX plugin implements a sustain-hold behaviour similar to an
-  instrument sustain pedal: when sustain (MIDI CC64) is held (value >= 64),
+  instrument sustain pedal: when sustain (MIDI CC64) is held (value > 0),
   incoming Note Off messages are intercepted and the notes are kept (held).
-  When the pedal is released (CC64 < 64), all previously held notes are
+  When the pedal is released (CC64 = 0), all previously held notes are
   released (Note Off messages are sent).
 
   FEATURES:
@@ -17,13 +17,11 @@ about:
   - Put this JSFX between your MIDI input and instrument in REAPER so it
     can intercept MIDI and forward events to the instrument.
   - Use slider `Channel` to select 0 (omni) or a single MIDI channel.
-  - Press and hold your sustain pedal (CC64 >= 64) — Note Offs will be
+  - Press and hold your sustain pedal (CC64 > 0) — Note Offs will be
     suppressed and notes will keep sounding. Release the pedal to release
     all held notes at once.
 
 slider1:0<0,16,1>Channel (0=omni)
-slider2:36<0,127,1>Low note
-slider3:84<0,127,1>High note
 
 in_pin:none
 out_pin:none
@@ -31,174 +29,77 @@ out_pin:none
 @init
 i = 0;
 while (i < 128) (
-  held[i] = 0;
-  held_chan[i] = 0;
-  held_vel[i] = 0;
+  held[i] = 0;        // notes waiting for pedal release
+  held_chan[i] = 0;   // their channels
+  active[i] = 0;      // currently pressed keys
+  active_chan[i] = 0; // channels of pressed keys
   i += 1;
 );
 pedal_down = 0;
-debug_mode = 1;
-low = 36;
-high = 84;
 
 @slider
+// Channel mapping:
+// slider1 = 0  -> omni (chan = -1, so all channels match)
+// slider1 = 1–16 -> MIDI channels 0–15
 s1   = slider1|0;
-chan = s1 ? (s1 - 1) : -1; // -1 = omni
-
-// Note range sliders
-low  = slider2|0;
-high = slider3|0;
-
-// If user sets Low > High, swap them
-low > high ? (
-  tmp  = low;
-  low  = high;
-  high = tmp;
-);
+chan = s1 ? (s1 - 1) : -1;
 
 @block
-// Process all incoming MIDI messages
 while (midirecv(ts, msg, msg23)) (
-  status = msg & $xf0;           // message type (note on/off, CC, ...)
-  ch     = msg & $x0f;           // MIDI channel 0..15
-  d1     = msg23 & $xff;         // data1 (note number or CC number)
-  d2     = (msg23/256) & $xff;   // data2 (velocity or CC value)
+  status = msg & $xf0;          // message type
+  ch     = msg & $x0f;          // MIDI channel 0..15
+  d1     = msg23 & $xff;        // data1 (note number or CC number)
+  d2     = (msg23/256) & $xff;  // data2 (velocity or CC value)
 
   in_chan = (chan < 0) || (ch == chan);
-  in_range = (d1 >= low) && (d1 <= high);
+  is_note = (status == $x90) || (status == $x80);
 
-  // Handle sustain pedal (CC64)
+  // Sustain pedal handling (CC64)
   status == $xb0 && d1 == 64 ? (
     // Forward the CC message unchanged
     midisend(ts, msg, msg23);
 
-    // Pedal down/up detection: CC value >=64 means pedal pressed
-    // First, check if we need to release held notes (pedal transitioning down)
-    (d2 < 64 && pedal_down) ? (
-      // Pedal released -> send Note Off for all held notes
-      debug_mode ? (
-        midisend(0, 0xF0, 0);  // debug marker
-      ) : (0);
+    // Pedal release: flush held notes
+    (d2 == 0 && pedal_down) ? (
       i = 0;
       while (i < 128) (
         held[i] ? (
           midisend(ts, $x80 + held_chan[i], i);
           held[i] = 0;
-          held_chan[i] = 0;
-          held_vel[i] = 0;
         );
         i += 1;
       );
-      pedal_down = 0;
-    ) : (0);
-
-    // Then update pedal state for next time
-    d2 >= 64 ? (
-      pedal_down = 1;
-    ) : (
-      pedal_down = 0;
     );
+
+    // Update pedal state
+    pedal_down = d2 > 0;
   ) : (
-    // Other messages — check for notes
-    is_note = (status == $x90) || (status == $x80);
-
+    // Note processing
     is_note && in_chan ? (
-      // Note On with velocity > 0: always forward, and mark as held
-      // if the note is inside the configured range (regardless of pedal).
-      status == $x90 && d2 ? (
-        // Always forward Note On immediately
+      note = d1;
+      vel  = d2;
+
+      status == $x90 && vel > 0 ? (
+        // New note on: forward and mark as active
         midisend(ts, msg, msg23);
-        in_range ? (
-          held[d1] = 1;
-          held_chan[d1] = ch;
-          held_vel[d1] = d2;
-        ) : (0);
+        active[note] = 1;
+        active_chan[note] = ch;
+        held[note] = 0; // reset any previously held state
       ) : (
-        // Note Off (0x80) or Note On with vel=0:
-        // - If the note is marked as held, suppress the Note Off (do nothing).
-        // - Otherwise forward the Note Off normally.
-        held[d1] ? (
-          // suppress note-off while it's held; keep held state until
-          // sustain pedal off triggers release of all held notes.
-          0;
+        // Note Off (0x80) or Note On with vel = 0
+        active[note] = 0;
+        pedal_down ? (
+          // With pedal down, block Note Off and mark to release later
+          held[note] = 1;
+          held_chan[note] = ch;
         ) : (
+          // No sustain: forward immediately
           midisend(ts, msg, msg23);
         );
       );
     ) : (
-      // Message is either:
-      // - a note on a different channel (check if it's a Note Off for a held note)
-      // - a non-note message
-      is_note ? (
-        // Note on different channel: still check if held
-        status == $x80 || (status == $x90 && d2 == 0) ? (
-          // This is a Note Off (either explicit 0x80 or Note On with vel=0)
-          held[d1] ? (
-            // suppress note-off for held notes even on other channels
-            0;
-          ) : (
-            midisend(ts, msg, msg23);
-          );
-        ) : (
-          // Note On on different channel - forward normally
-          midisend(ts, msg, msg23);
-        );
-      ) : (
-        // Non-note message - forward unchanged
-        midisend(ts, msg, msg23);
-      );
+      // Non-note or other channel: forward unchanged
+      midisend(ts, msg, msg23);
     );
   );
 );
-
-@gfx 800 200
-// Simple UI to visualize held notes and pedal state
-gfx_clear = 0x2a2a2a;  // dark background
-gfx_set(1, 1, 1);
-
-// Draw title and debug info
-gfx_x = 10;
-gfx_y = 10;
-gfx_setfont(1, "Arial", 16, 'b');
-gfx_drawstr("Held Notes (Range: " + low + "-" + high + "):");
-
-gfx_setfont(1, "Arial", 11);
-gfx_x = 10;
-gfx_y = 32;
-gfx_drawstr("Channel: " + (chan < 0 ? "Omni" : sprintf(#, "%d", chan+1)));
-
-// Count and draw held notes
-gfx_y = 50;
-gfx_x = 10;
-gfx_setfont(1, "Arial", 12);
-
-note_count = 0;
-held_list = "";
-i = 0;
-while (i < 128) (
-  held[i] ? (
-    held_list = held_list + (note_count > 0 ? ", " : "") + sprintf(#, "%d", i);
-    note_count += 1;
-  );
-  i += 1;
-);
-
-// Display held notes info
-gfx_drawstr("Count: " + note_count);
-gfx_x = 10;
-gfx_y = 68;
-gfx_drawstr("Notes: " + (note_count > 0 ? held_list : "(none)"));
-
-// Draw pedal state
-gfx_x = 10;
-gfx_y = 100;
-gfx_setfont(1, "Arial", 14, 'b');
-pedal_down ? (
-  gfx_set(0.2, 1.0, 0.2);  // green for pedal down
-  gfx_drawstr("PEDAL: ON (>=64)");
-) : (
-  gfx_set(1.0, 0.2, 0.2);  // red for pedal up
-  gfx_drawstr("PEDAL: OFF (<64)");
-);
-
-gfx_set(1, 1, 1);  // reset to white
