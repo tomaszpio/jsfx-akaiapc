@@ -1,0 +1,77 @@
+desc: MIDI sustain filter - hold notes while CC64 is active
+author: tomaszpio
+version: 1.0.0
+about:
+  A minimal sustain-style JSFX. When sustain (MIDI CC64) is above 0, it
+  remembers any Note On messages and blocks their corresponding Note Off
+  messages. When sustain returns to 0, all blocked Note Offs are sent so
+  the notes are released.
+
+  HOW IT WORKS:
+  - Note On messages always pass through immediately.
+  - If sustain (CC64) is > 0 when a Note Off arrives, the Note Off is
+    suppressed and the note is marked as "held".
+  - When sustain returns to 0, all held notes receive a Note Off.
+  - Non-note messages and CC64 are forwarded unchanged.
+
+in_pin:none
+out_pin:none
+
+@init
+i = 0;
+while (i < 128) (
+  held[i] = 0;        // whether the note is waiting for release
+  held_chan[i] = 0;   // MIDI channel for the held note
+  i += 1;
+);
+pedal_down = 0;
+
+@block
+while (midirecv(ts, msg, msg23)) (
+  status = msg & $xf0;          // message type
+  ch     = msg & $x0f;          // MIDI channel 0..15
+  d1     = msg23 & $xff;        // data1 (note number or CC number)
+  d2     = (msg23/256) & $xff;  // data2 (velocity or CC value)
+
+  // Sustain pedal: forward and update state
+  status == $xb0 && d1 == 64 ? (
+    midisend(ts, msg, msg23);
+
+    // When pedal is released, flush all held notes
+    (d2 == 0 && pedal_down) ? (
+      i = 0;
+      while (i < 128) (
+        held[i] ? (
+          midisend(ts, $x80 + held_chan[i], i);
+          held[i] = 0;
+        );
+        i += 1;
+      );
+    );
+
+    pedal_down = d2 > 0;
+  ) : (
+    // Note handling
+    (status == $x90 || status == $x80) ? (
+      note = d1;
+      vel  = d2;
+
+      // Note On with velocity > 0
+      status == $x90 && vel > 0 ? (
+        midisend(ts, msg, msg23);
+        held[note] = 0; // clear any previous held state
+      ) : (
+        // Note Off (or Note On with velocity 0)
+        pedal_down ? (
+          held[note] = 1;
+          held_chan[note] = ch;
+        ) : (
+          midisend(ts, msg, msg23);
+        );
+      );
+    ) : (
+      // Forward other MIDI messages unchanged
+      midisend(ts, msg, msg23);
+    );
+  );
+);
