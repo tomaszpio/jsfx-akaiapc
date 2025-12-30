@@ -32,7 +32,7 @@ class MidiSustainHoldSimulator:
 
             if msg_type == CC and d1 == SUSTAIN_CC:
                 outputs.append((status, d1, d2))
-                sustain_on = d2 >= 64
+                sustain_on = d2 > 0
                 if self.pedal_down and not sustain_on:
                     for note, held in enumerate(self.held):
                         if held:
@@ -105,13 +105,14 @@ def test_multiple_notes_released_on_pedal_up():
     ]
 
 
-def test_pedal_release_when_value_drops_below_threshold():
+def test_pedal_release_only_at_zero():
     sim = MidiSustainHoldSimulator()
     events = [
         (NOTE_ON, 50, 97),
         (CC, SUSTAIN_CC, 100),  # sustain engaged
         (NOTE_OFF, 50, 0),      # should be held
-        (CC, SUSTAIN_CC, 60),   # below 64 releases held notes
+        (CC, SUSTAIN_CC, 60),   # still held because sustain > 0
+        (CC, SUSTAIN_CC, 0),    # zero releases held notes
     ]
 
     output = sim.process(events)
@@ -120,5 +121,6 @@ def test_pedal_release_when_value_drops_below_threshold():
         "90:50:97",
         "B0:64:100",
         "B0:64:60",
+        "B0:64:0",
         "80:50:0",
     ]
