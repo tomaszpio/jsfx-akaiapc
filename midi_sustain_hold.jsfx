@@ -1,17 +1,18 @@
 desc: MIDI sustain hold - hold multiple notes while sustain pedal (CC64) is pressed
 author: tomaszpio
-version: 1.1.0
+version: 1.1.1
 about:
   This JSFX plugin implements a sustain-hold behaviour similar to an
-  instrument sustain pedal: when sustain (MIDI CC64) is held (value > 0),
+  instrument sustain pedal: when sustain (MIDI CC64) is held (value >= 64),
   incoming Note Off messages are intercepted and the notes are kept (held).
-  When the pedal is released (CC64 = 0), all previously held notes are
+  When the pedal is released (CC64 < 64), all previously held notes are
   released (Note Off messages are sent).
 
   FEATURES:
   - Works in Omni mode (Channel = 0) or on a single MIDI channel (1..16).
   - Holds any number of notes simultaneously while sustain is pressed.
   - CC64 messages and all non-note messages are forwarded unchanged.
+  - Sustain engages at values >= 64 and releases below 64 (per MIDI spec).
 
   USAGE:
   - Put this JSFX between your MIDI input and instrument in REAPER so it
@@ -59,8 +60,10 @@ while (midirecv(ts, msg, msg23)) (
     // Forward the CC message unchanged
     midisend(ts, msg, msg23);
 
+    sustain_on = d2 >= 64;
+
     // Pedal release: flush held notes
-    (d2 == 0 && pedal_down) ? (
+    (pedal_down && !sustain_on) ? (
       i = 0;
       while (i < 128) (
         held[i] ? (
@@ -72,7 +75,7 @@ while (midirecv(ts, msg, msg23)) (
     );
 
     // Update pedal state
-    pedal_down = d2 > 0;
+    pedal_down = sustain_on;
   ) : (
     // Note processing
     is_note && in_chan ? (
