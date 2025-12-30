@@ -1,17 +1,17 @@
 desc: MIDI sustain filter - hold notes while CC64 is active
 author: tomaszpio
-version: 1.2.2
+version: 1.3.0
 about:
-  A minimal sustain-style JSFX. When sustain (MIDI CC64) is >= 64, it
+  A minimal sustain-style JSFX. When sustain (MIDI CC64) is > 0, it
   remembers any Note On messages (and any later Note Offs) and holds those
-  notes. When sustain falls below 64, Note Off is sent for every remembered
+  notes. When sustain returns to 0, Note Off is sent for every remembered
   note so all held notes are released.
 
   HOW IT WORKS:
   - Note On messages always pass through immediately.
-  - If sustain (CC64) is >= 64, Note On and Note Off are remembered (held)
+  - If sustain (CC64) is > 0, Note On and Note Off are remembered (held)
     instead of being released normally.
-  - When sustain falls below 64, all held notes receive a Note Off.
+  - When sustain returns to 0, all held notes receive a Note Off.
   - Non-note messages and CC64 are forwarded unchanged.
 
 in_pin:none
@@ -37,8 +37,8 @@ while (midirecv(ts, msg, msg23)) (
   status == $xb0 && d1 == 64 ? (
     midisend(ts, msg, msg23);
 
-    // CC64 is "on" for values >= 64, "off" otherwise
-    sustain_on = d2 >= 64;
+    // CC64 is "on" for values > 0, "off" only at 0
+    sustain_on = d2 > 0;
 
     // When pedal transitions to released, flush all held notes
     (pedal_down && !sustain_on) ? (

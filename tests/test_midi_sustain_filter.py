@@ -29,7 +29,7 @@ class MidiSustainFilterSimulator:
             # Sustain pedal
             if msg_type == CC and d1 == SUSTAIN_CC:
                 outputs.append((status, d1, d2))
-                sustain_on = d2 >= 64
+                sustain_on = d2 > 0
                 if self.pedal_down and not sustain_on:
                     for note, held in enumerate(self.held):
                         if held:
@@ -84,14 +84,14 @@ def test_note_offs_flushed_when_pedal_value_hits_zero():
     ]
 
 
-def test_pedal_release_occurs_when_value_drops_below_threshold():
+def test_pedal_release_occurs_only_at_zero():
     sim = MidiSustainFilterSimulator()
     events = [
         (NOTE_ON, 62, 90),
         (CC, SUSTAIN_CC, 90),
         (NOTE_OFF, 62, 0),
-        (CC, SUSTAIN_CC, 50),  # below threshold triggers release
-        (CC, SUSTAIN_CC, 0),   # stays released
+        (CC, SUSTAIN_CC, 50),  # still held because sustain > 0
+        (CC, SUSTAIN_CC, 0),   # release when sustain hits 0
     ]
 
     output = sim.process(events)
@@ -100,8 +100,8 @@ def test_pedal_release_occurs_when_value_drops_below_threshold():
         "90:62:90",
         "B0:64:90",
         "B0:64:50",
-        "80:62:0",
         "B0:64:0",
+        "80:62:0",
     ]
 
 
