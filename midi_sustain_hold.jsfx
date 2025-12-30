@@ -28,14 +28,17 @@ in_pin:none
 out_pin:none
 
 @init
-i = 0;
-while (i < 128) (
-  held[i] = 0;        // notes waiting for pedal release
-  held_chan[i] = 0;   // their channels
-  active[i] = 0;      // currently pressed keys
-  active_chan[i] = 0; // channels of pressed keys
-  i += 1;
-);
+// Track up to 10 simultaneous notes using dedicated variables (no arrays).
+slot0_note = -1; slot0_chan = 0; slot0_pressed = 0; slot0_sustain = 0;
+slot1_note = -1; slot1_chan = 0; slot1_pressed = 0; slot1_sustain = 0;
+slot2_note = -1; slot2_chan = 0; slot2_pressed = 0; slot2_sustain = 0;
+slot3_note = -1; slot3_chan = 0; slot3_pressed = 0; slot3_sustain = 0;
+slot4_note = -1; slot4_chan = 0; slot4_pressed = 0; slot4_sustain = 0;
+slot5_note = -1; slot5_chan = 0; slot5_pressed = 0; slot5_sustain = 0;
+slot6_note = -1; slot6_chan = 0; slot6_pressed = 0; slot6_sustain = 0;
+slot7_note = -1; slot7_chan = 0; slot7_pressed = 0; slot7_sustain = 0;
+slot8_note = -1; slot8_chan = 0; slot8_pressed = 0; slot8_sustain = 0;
+slot9_note = -1; slot9_chan = 0; slot9_pressed = 0; slot9_sustain = 0;
 pedal_down = 0;
 
 @slider
@@ -64,14 +67,16 @@ while (midirecv(ts, msg, msg23)) (
 
     // Pedal release: flush held notes
     (pedal_down && !sustain_on) ? (
-      i = 0;
-      while (i < 128) (
-        held[i] ? (
-          midisend(ts, $x80 + held_chan[i], i);
-          held[i] = 0;
-        );
-        i += 1;
-      );
+      slot0_sustain ? (midisend(ts, $x80 + slot0_chan, slot0_note); slot0_sustain = 0; slot0_pressed ? 0 : slot0_note = -1;);
+      slot1_sustain ? (midisend(ts, $x80 + slot1_chan, slot1_note); slot1_sustain = 0; slot1_pressed ? 0 : slot1_note = -1;);
+      slot2_sustain ? (midisend(ts, $x80 + slot2_chan, slot2_note); slot2_sustain = 0; slot2_pressed ? 0 : slot2_note = -1;);
+      slot3_sustain ? (midisend(ts, $x80 + slot3_chan, slot3_note); slot3_sustain = 0; slot3_pressed ? 0 : slot3_note = -1;);
+      slot4_sustain ? (midisend(ts, $x80 + slot4_chan, slot4_note); slot4_sustain = 0; slot4_pressed ? 0 : slot4_note = -1;);
+      slot5_sustain ? (midisend(ts, $x80 + slot5_chan, slot5_note); slot5_sustain = 0; slot5_pressed ? 0 : slot5_note = -1;);
+      slot6_sustain ? (midisend(ts, $x80 + slot6_chan, slot6_note); slot6_sustain = 0; slot6_pressed ? 0 : slot6_note = -1;);
+      slot7_sustain ? (midisend(ts, $x80 + slot7_chan, slot7_note); slot7_sustain = 0; slot7_pressed ? 0 : slot7_note = -1;);
+      slot8_sustain ? (midisend(ts, $x80 + slot8_chan, slot8_note); slot8_sustain = 0; slot8_pressed ? 0 : slot8_note = -1;);
+      slot9_sustain ? (midisend(ts, $x80 + slot9_chan, slot9_note); slot9_sustain = 0; slot9_pressed ? 0 : slot9_note = -1;);
     );
 
     // Update pedal state
@@ -82,22 +87,98 @@ while (midirecv(ts, msg, msg23)) (
       note = d1;
       vel  = d2;
 
+      // Find an existing slot for this note/channel and remember the first empty slot
+      slot_idx = -1;
+      empty_idx = -1;
+
+      (slot_idx < 0) && (slot0_note == note) && (slot0_chan == ch) ? slot_idx = 0;
+      (slot_idx < 0) && (slot1_note == note) && (slot1_chan == ch) ? slot_idx = 1;
+      (slot_idx < 0) && (slot2_note == note) && (slot2_chan == ch) ? slot_idx = 2;
+      (slot_idx < 0) && (slot3_note == note) && (slot3_chan == ch) ? slot_idx = 3;
+      (slot_idx < 0) && (slot4_note == note) && (slot4_chan == ch) ? slot_idx = 4;
+      (slot_idx < 0) && (slot5_note == note) && (slot5_chan == ch) ? slot_idx = 5;
+      (slot_idx < 0) && (slot6_note == note) && (slot6_chan == ch) ? slot_idx = 6;
+      (slot_idx < 0) && (slot7_note == note) && (slot7_chan == ch) ? slot_idx = 7;
+      (slot_idx < 0) && (slot8_note == note) && (slot8_chan == ch) ? slot_idx = 8;
+      (slot_idx < 0) && (slot9_note == note) && (slot9_chan == ch) ? slot_idx = 9;
+
+      (empty_idx < 0) && (slot0_note < 0) ? empty_idx = 0;
+      (empty_idx < 0) && (slot1_note < 0) ? empty_idx = 1;
+      (empty_idx < 0) && (slot2_note < 0) ? empty_idx = 2;
+      (empty_idx < 0) && (slot3_note < 0) ? empty_idx = 3;
+      (empty_idx < 0) && (slot4_note < 0) ? empty_idx = 4;
+      (empty_idx < 0) && (slot5_note < 0) ? empty_idx = 5;
+      (empty_idx < 0) && (slot6_note < 0) ? empty_idx = 6;
+      (empty_idx < 0) && (slot7_note < 0) ? empty_idx = 7;
+      (empty_idx < 0) && (slot8_note < 0) ? empty_idx = 8;
+      (empty_idx < 0) && (slot9_note < 0) ? empty_idx = 9;
+
+      (slot_idx < 0) && (empty_idx >= 0) ? slot_idx = empty_idx;
+
+      // Initialize the slot when it is first claimed
+      slot_idx == 0 ? (slot0_note = note; slot0_chan = ch;);
+      slot_idx == 1 ? (slot1_note = note; slot1_chan = ch;);
+      slot_idx == 2 ? (slot2_note = note; slot2_chan = ch;);
+      slot_idx == 3 ? (slot3_note = note; slot3_chan = ch;);
+      slot_idx == 4 ? (slot4_note = note; slot4_chan = ch;);
+      slot_idx == 5 ? (slot5_note = note; slot5_chan = ch;);
+      slot_idx == 6 ? (slot6_note = note; slot6_chan = ch;);
+      slot_idx == 7 ? (slot7_note = note; slot7_chan = ch;);
+      slot_idx == 8 ? (slot8_note = note; slot8_chan = ch;);
+      slot_idx == 9 ? (slot9_note = note; slot9_chan = ch;);
+
       status == $x90 && vel > 0 ? (
         // New note on: forward and mark as active
         midisend(ts, msg, msg23);
-        active[note] = 1;
-        active_chan[note] = ch;
-        held[note] = 0; // reset any previously held state
+        slot_idx == 0 ? (slot0_pressed = 1; slot0_sustain = 0;);
+        slot_idx == 1 ? (slot1_pressed = 1; slot1_sustain = 0;);
+        slot_idx == 2 ? (slot2_pressed = 1; slot2_sustain = 0;);
+        slot_idx == 3 ? (slot3_pressed = 1; slot3_sustain = 0;);
+        slot_idx == 4 ? (slot4_pressed = 1; slot4_sustain = 0;);
+        slot_idx == 5 ? (slot5_pressed = 1; slot5_sustain = 0;);
+        slot_idx == 6 ? (slot6_pressed = 1; slot6_sustain = 0;);
+        slot_idx == 7 ? (slot7_pressed = 1; slot7_sustain = 0;);
+        slot_idx == 8 ? (slot8_pressed = 1; slot8_sustain = 0;);
+        slot_idx == 9 ? (slot9_pressed = 1; slot9_sustain = 0;);
       ) : (
         // Note Off (0x80) or Note On with vel = 0
-        active[note] = 0;
-        pedal_down ? (
+        slot_idx == 0 ? slot0_pressed = 0;
+        slot_idx == 1 ? slot1_pressed = 0;
+        slot_idx == 2 ? slot2_pressed = 0;
+        slot_idx == 3 ? slot3_pressed = 0;
+        slot_idx == 4 ? slot4_pressed = 0;
+        slot_idx == 5 ? slot5_pressed = 0;
+        slot_idx == 6 ? slot6_pressed = 0;
+        slot_idx == 7 ? slot7_pressed = 0;
+        slot_idx == 8 ? slot8_pressed = 0;
+        slot_idx == 9 ? slot9_pressed = 0;
+
+        pedal_down && (slot_idx >= 0) ? (
           // With pedal down, block Note Off and mark to release later
-          held[note] = 1;
-          held_chan[note] = ch;
+          slot_idx == 0 ? slot0_sustain = 1;
+          slot_idx == 1 ? slot1_sustain = 1;
+          slot_idx == 2 ? slot2_sustain = 1;
+          slot_idx == 3 ? slot3_sustain = 1;
+          slot_idx == 4 ? slot4_sustain = 1;
+          slot_idx == 5 ? slot5_sustain = 1;
+          slot_idx == 6 ? slot6_sustain = 1;
+          slot_idx == 7 ? slot7_sustain = 1;
+          slot_idx == 8 ? slot8_sustain = 1;
+          slot_idx == 9 ? slot9_sustain = 1;
         ) : (
           // No sustain: forward immediately
           midisend(ts, msg, msg23);
+          // Free the slot if no sustain keeps it around
+          (slot_idx == 0) && (slot0_sustain == 0) ? (slot0_note = -1; slot0_chan = 0;);
+          (slot_idx == 1) && (slot1_sustain == 0) ? (slot1_note = -1; slot1_chan = 0;);
+          (slot_idx == 2) && (slot2_sustain == 0) ? (slot2_note = -1; slot2_chan = 0;);
+          (slot_idx == 3) && (slot3_sustain == 0) ? (slot3_note = -1; slot3_chan = 0;);
+          (slot_idx == 4) && (slot4_sustain == 0) ? (slot4_note = -1; slot4_chan = 0;);
+          (slot_idx == 5) && (slot5_sustain == 0) ? (slot5_note = -1; slot5_chan = 0;);
+          (slot_idx == 6) && (slot6_sustain == 0) ? (slot6_note = -1; slot6_chan = 0;);
+          (slot_idx == 7) && (slot7_sustain == 0) ? (slot7_note = -1; slot7_chan = 0;);
+          (slot_idx == 8) && (slot8_sustain == 0) ? (slot8_note = -1; slot8_chan = 0;);
+          (slot_idx == 9) && (slot9_sustain == 0) ? (slot9_note = -1; slot9_chan = 0;);
         );
       );
     ) : (
