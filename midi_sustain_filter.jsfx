@@ -1,6 +1,6 @@
 desc: MIDI sustain filter - hold notes while CC64 is active
 author: tomaszpio
-version: 1.3.0
+version: 1.3.1
 about:
   A minimal sustain-style JSFX. When sustain (MIDI CC64) is above 0, it
   remembers any Note On messages (and any later Note Offs) and holds those
@@ -63,6 +63,8 @@ while (midirecv(ts, msg, msg23)) (
         held[i] ? (
           midisend(ts, $x80 + held_chan[i], i);
           held[i] = 0;
+          active[i] = 0;
+          active_chan[i] = 0;
         );
         i += 1;
       );

@@ -44,6 +44,8 @@ class MidiSustainFilterSimulator:
                         if held:
                             outputs.append((NOTE_OFF + self.held_chan[note], note, 0))
                             self.held[note] = False
+                            self.active[note] = False
+                            self.active_chan[note] = 0
                 self.pedal_down = sustain_on
                 continue
 
@@ -150,6 +152,68 @@ def test_note_on_before_pedal_down_releases_on_pedal_up():
         "90:55:92",
         "B0:64:10",
         "B0:64:127",
+        "B0:64:0",
+        "80:55:0",
+    ]
+
+
+def test_ramping_cc_values_still_release_on_zero():
+    sim = MidiSustainFilterSimulator()
+    events = [
+        (NOTE_ON, 55, 92),
+        (CC, SUSTAIN_CC, 10),
+        (CC, SUSTAIN_CC, 20),
+        (CC, SUSTAIN_CC, 32),
+        (CC, SUSTAIN_CC, 42),
+        (CC, SUSTAIN_CC, 52),
+        (CC, SUSTAIN_CC, 64),
+        (CC, SUSTAIN_CC, 72),
+        (CC, SUSTAIN_CC, 82),
+        (CC, SUSTAIN_CC, 94),
+        (CC, SUSTAIN_CC, 104),
+        (CC, SUSTAIN_CC, 114),
+        (CC, SUSTAIN_CC, 126),
+        (CC, SUSTAIN_CC, 127),
+        (CC, SUSTAIN_CC, 118),
+        (CC, SUSTAIN_CC, 108),
+        (CC, SUSTAIN_CC, 96),
+        (CC, SUSTAIN_CC, 84),
+        (CC, SUSTAIN_CC, 70),
+        (CC, SUSTAIN_CC, 60),
+        (CC, SUSTAIN_CC, 46),
+        (CC, SUSTAIN_CC, 34),
+        (CC, SUSTAIN_CC, 22),
+        (CC, SUSTAIN_CC, 8),
+        (CC, SUSTAIN_CC, 0),
+    ]
+
+    output = sim.process(events)
+
+    assert format_events(output) == [
+        "90:55:92",
+        "B0:64:10",
+        "B0:64:20",
+        "B0:64:32",
+        "B0:64:42",
+        "B0:64:52",
+        "B0:64:64",
+        "B0:64:72",
+        "B0:64:82",
+        "B0:64:94",
+        "B0:64:104",
+        "B0:64:114",
+        "B0:64:126",
+        "B0:64:127",
+        "B0:64:118",
+        "B0:64:108",
+        "B0:64:96",
+        "B0:64:84",
+        "B0:64:70",
+        "B0:64:60",
+        "B0:64:46",
+        "B0:64:34",
+        "B0:64:22",
+        "B0:64:8",
         "B0:64:0",
         "80:55:0",
     ]
