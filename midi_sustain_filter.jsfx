@@ -1,6 +1,6 @@
 desc: MIDI sustain filter - hold notes while CC64 is active
 author: tomaszpio
-version: 1.2.1
+version: 1.3.1
 about:
   A minimal sustain-style JSFX. When sustain (MIDI CC64) is above 0, it
   remembers any Note On messages (and any later Note Offs) and holds those
@@ -12,6 +12,8 @@ about:
   - If sustain (CC64) is > 0, Note On and Note Off are remembered (held)
     instead of being released normally.
   - When sustain returns to 0, all held notes receive a Note Off.
+  - Notes that are already sounding when the pedal is pressed are also
+    remembered so they are released when the pedal goes back to 0.
   - Non-note messages and CC64 are forwarded unchanged.
 
 in_pin:none
@@ -22,6 +24,8 @@ i = 0;
 while (i < 128) (
   held[i] = 0;        // whether the note is waiting for release
   held_chan[i] = 0;   // MIDI channel for the held note
+  active[i] = 0;      // notes currently sounding
+  active_chan[i] = 0;
   i += 1;
 );
 pedal_down = 0;
@@ -40,6 +44,18 @@ while (midirecv(ts, msg, msg23)) (
     // CC64 is "on" for values > 0, "off" otherwise
     sustain_on = d2 > 0;
 
+    // Pedal pressed: capture any currently sounding notes
+    (!pedal_down && sustain_on) ? (
+      i = 0;
+      while (i < 128) (
+        active[i] ? (
+          held[i] = 1;
+          held_chan[i] = active_chan[i];
+        );
+        i += 1;
+      );
+    );
+
     // When pedal transitions to released, flush all held notes
     (pedal_down && !sustain_on) ? (
       i = 0;
@@ -47,6 +63,8 @@ while (midirecv(ts, msg, msg23)) (
         held[i] ? (
           midisend(ts, $x80 + held_chan[i], i);
           held[i] = 0;
+          active[i] = 0;
+          active_chan[i] = 0;
         );
         i += 1;
       );
@@ -62,6 +80,8 @@ while (midirecv(ts, msg, msg23)) (
       status == $x90 && vel > 0 ? (
         // Note On always passes through
         midisend(ts, msg, msg23);
+        active[note] = 1;
+        active_chan[note] = ch;
         pedal_down ? (
           // Remember the note if sustain is currently engaged
           held[note] = 1;
@@ -71,6 +91,7 @@ while (midirecv(ts, msg, msg23)) (
         );
       ) : (
         // Note Off (or Note On with velocity 0)
+        active[note] = 0;
         pedal_down ? (
           // While sustain is down, remember to release later
           held[note] = 1;
