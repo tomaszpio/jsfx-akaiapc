@@ -1,18 +1,18 @@
-desc: MIDI Keyboard Split to Two Channels
+desc: MIDI Keyboard Split Filter
 author: ChatGPT (JSFX)
 version: 1.0.0
 about:
-  Splits incoming MIDI notes by a split key and routes:
-  - lower zone notes -> Low Channel
-  - upper zone notes -> High Channel
-  Tracks per-note zone stack so Note Off goes to the same output channel
-  even if you change split while holding notes.
+  Filters incoming MIDI notes by split key and input channel:
+  - Lower zone notes accepted only from Low Input Channel
+  - Upper zone notes accepted only from High Input Channel
+  - Accepted notes routed to Output Channel
+  Tracks per-note zone stack for consistency.
 
 slider1:60<0,127,1>Split note (MIDI #)
-slider2:1<1,16,1>Low zone channel
-slider3:2<1,16,1>High zone channel
-slider4:1<0,1,1>Split note belongs to (0=Lower, 1=Upper)
-slider5:0<0,3,1>Other MIDI (0=Pass, 1=To Low, 2=To High, 3=To Both)
+slider2:1<1,16,1>Output channel
+slider3:1<1,16,1>Low zone input channel
+slider4:2<1,16,1>High zone input channel
+slider5:0<0,1,1>Other MIDI (0=Pass, 1=Block)
 
 @init
 // Per-note zone stack to keep Note Off consistent after changing split.
@@ -66,30 +66,17 @@ function set_chan(statusbyte, ch1to16) (
   (statusbyte & 0xF0) | ((ch1to16-1) & 0x0F);
 );
 
-function send_to_zone(offset, statusbyte, msg23, zone) local(ch, out1) (
-  ch = zone ? slider3 : slider2;
-  out1 = set_chan(statusbyte, ch);
+function send_to_zone(offset, statusbyte, msg23, zone) (
+  out1 = set_chan(statusbyte, slider2);
   midisend(offset, out1, msg23);
 );
 
-function send_other(offset, statusbyte, msg23) local(mode, out1, out2) (
+function send_other(offset, statusbyte, msg23) (
   mode = slider5;
   mode == 0 ? (
     midisend(offset, statusbyte, msg23);
-  ) :
-  mode == 1 ? (
-    out1 = set_chan(statusbyte, slider2);
-    midisend(offset, out1, msg23);
-  ) :
-  mode == 2 ? (
-    out1 = set_chan(statusbyte, slider3);
-    midisend(offset, out1, msg23);
-  ) :
-  (
-    out1 = set_chan(statusbyte, slider2);
-    out2 = set_chan(statusbyte, slider3);
-    midisend(offset, out1, msg23);
-    out2 != out1 ? midisend(offset, out2, msg23);
+  ) : (
+    // block
   );
 );
 
@@ -99,28 +86,42 @@ function send_other(offset, statusbyte, msg23) local(mode, out1, out2) (
 @block
 while (midirecv(offset, msg1, msg23)) (
   status = msg1 & 0xF0;
+  in_ch = msg1 & 0x0F;
   note = msg23 & 0xFF;
   vel = (msg23 >> 8) & 0xFF;
+  zone = zone_for_note(note);
+  accepted = (zone == 0 && in_ch == slider3 - 1) || (zone == 1 && in_ch == slider4 - 1);
   status == 0x90 ? (
-    vel > 0 ? (
-      zone = zone_for_note(note);
-      push_zone(note, zone);
-      send_to_zone(offset, msg1, msg23, zone);
+    accepted ? (
+      vel > 0 ? (
+        push_zone(note, zone);
+        send_to_zone(offset, msg1, msg23, zone);
+      ) : (
+        zone = pop_zone(note);
+        zone < 0 ? zone = zone_for_note(note);
+        send_to_zone(offset, (msg1 & 0xF0) | (msg1 & 0x0F), (0x00 << 8) | note, zone);
+      );
     ) : (
-      zone = pop_zone(note);
-      zone < 0 ? zone = zone_for_note(note);
-      send_to_zone(offset, (msg1 & 0xF0) | (msg1 & 0x0F), (0x00 << 8) | note, zone);
+      // not accepted, skip
     );
   ) :
   status == 0x80 ? (
-    zone = pop_zone(note);
-    zone < 0 ? zone = zone_for_note(note);
-    send_to_zone(offset, msg1, msg23, zone);
+    accepted ? (
+      zone = pop_zone(note);
+      zone < 0 ? zone = zone_for_note(note);
+      send_to_zone(offset, msg1, msg23, zone);
+    ) : (
+      // skip
+    );
   ) :
   status == 0xA0 ? (
-    zone = peek_zone(note);
-    zone < 0 ? zone = zone_for_note(note);
-    send_to_zone(offset, msg1, msg23, zone);
+    accepted ? (
+      zone = peek_zone(note);
+      zone < 0 ? zone = zone_for_note(note);
+      send_to_zone(offset, msg1, msg23, zone);
+    ) : (
+      // skip
+    );
   ) :
   (
     send_other(offset, msg1, msg23);
@@ -130,15 +131,10 @@ while (midirecv(offset, msg1, msg23)) (
 @gfx 200 80
 gfx_setfont(1, "Arial", 16);
 gfx_x = 10; gfx_y = 10;
-gfx_printf("Split: %d   Low ch: %d   High ch: %d", slider1, slider2, slider3);
+gfx_printf("Split: %d   Out ch: %d   Low in: %d   High in: %d", slider1, slider2, slider3, slider4);
 
 gfx_setfont(1, "Arial", 12);
-gfx_x = 10; gfx_y = 35;
-slider4 ? gfx_printf("Split key belongs to: UPPER") : gfx_printf("Split key belongs to: LOWER");
-
 gfx_x = 10; gfx_y = 55;
 mode = slider5;
 mode == 0 ? gfx_printf("Other MIDI: PASS") :
-mode == 1 ? gfx_printf("Other MIDI: to LOW") :
-mode == 2 ? gfx_printf("Other MIDI: to HIGH") :
-gfx_printf("Other MIDI: to BOTH");
+gfx_printf("Other MIDI: BLOCK");
