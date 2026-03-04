@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-REAPER MIDI CC Editor - GUI Application
+REAPER MIDI CC Editor - GUI Application Version 1.1
 - View & edit MIDI CC assignments in REAPER .RPP files
 - Multi-row selection for bulk CC / Channel / Bus reassignment
 - Routing visualisation: node graph, matrix, text list (separate window)
