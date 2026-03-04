@@ -52,8 +52,8 @@ def decode_midi_ch_field(val: int):
     src_raw = val & 0x1F
     dst_raw = val >> 5          # same as floor(val/32)
 
-    src_label = 'All' if src_raw == 17 else (f'Ch {src_raw}' if src_raw else '?')
-    dst_label = 'Original' if dst_raw == 0 else (f'Ch {dst_raw}')
+    src_label = 'All' if src_raw == 17 else (f'Ch {src_raw - 1}' if src_raw else '?')
+    dst_label = 'Original' if dst_raw == 0 else (f'Ch {dst_raw - 1}')
 
     return True, src_label, dst_label
 
@@ -129,6 +129,8 @@ class REAPERProject:
                             pass
 
                 elif stripped.startswith('AUXRECV '):
+                    # AUXRECV src mode vol pan mute mono phase src_ach dst_ach panlaw midi_ch auto
+                    #  [0]    [1] [2]  [3] [4] [5]  [6]  [7]   [8]    [9]    [10]   [11]   [12]
                     parts = stripped.split()
                     try:
                         src_idx    = int(parts[1])
@@ -147,8 +149,8 @@ class REAPERProject:
                             'src_ach':     src_ach,
                             'dst_ach':     dst_ach,
                             'has_midi':    has_midi,
-                            'midi_src_ch': midi_src_ch,
-                            'midi_dst_ch': midi_dst_ch,
+                            'midi_src_ch': midi_src_ch,   # e.g. 'Ch 3', 'All', or None
+                            'midi_dst_ch': midi_dst_ch,   # e.g. 'Ch 1', 'Original', or None
                             'midi_raw':    midi_field,
                         })
                     except (ValueError, IndexError):
@@ -291,6 +293,12 @@ class RoutingWindow:
         self._selected_node: Optional[int] = None
         self._drag_moved = False
 
+        # Graph filter state — must exist before _draw_graph is first called
+        self._gf_audio   = tk.BooleanVar(value=True)
+        self._gf_midi    = tk.BooleanVar(value=True)
+        self._gf_midi_ch = tk.StringVar(value='All')
+        self._gf_ch_dir  = tk.StringVar(value='either')
+
         self._build_ui()
         self._layout_nodes()
         self._refresh_all()
@@ -317,6 +325,7 @@ class RoutingWindow:
     # ── Node graph ───────────────────────────────────────────────────────
 
     def _build_graph_tab(self):
+        # ── Row 1: legend + reset ────────────────────────────────────────
         tb = tk.Frame(self.graph_frame, bg='#252525')
         tb.pack(fill=tk.X)
         tk.Label(tb, text='Legend:', bg='#252525', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT, padx=8)
@@ -328,6 +337,39 @@ class RoutingWindow:
                   command=self._reset_layout, padx=8).pack(side=tk.RIGHT, padx=6, pady=3)
         tk.Label(tb, text='Drag nodes • Scroll to zoom', bg='#252525', fg='#555',
                  font=('Arial', 8)).pack(side=tk.RIGHT, padx=8)
+
+        # ── Row 2: connection filters ────────────────────────────────────
+        fb = tk.Frame(self.graph_frame, bg='#1e1e1e')
+        fb.pack(fill=tk.X)
+
+        tk.Label(fb, text='Show:', bg='#1e1e1e', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT, padx=(8,4), pady=4)
+
+        tk.Checkbutton(fb, text='Audio', variable=self._gf_audio, bg='#1e1e1e',
+                       fg=AUDIO_COLOR, selectcolor='#333', activebackground='#1e1e1e',
+                       command=self._draw_graph).pack(side=tk.LEFT, padx=4)
+        tk.Checkbutton(fb, text='MIDI',  variable=self._gf_midi,  bg='#1e1e1e',
+                       fg=MIDI_COLOR,  selectcolor='#333', activebackground='#1e1e1e',
+                       command=self._draw_graph).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(fb, text='│', bg='#1e1e1e', fg='#444').pack(side=tk.LEFT, padx=4)
+        tk.Label(fb, text='MIDI ch:', bg='#1e1e1e', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT, padx=(4,2))
+
+        ch_options = ['All'] + [str(i) for i in range(0, 16)]
+        ch_menu = ttk.Combobox(fb, textvariable=self._gf_midi_ch, values=ch_options,
+                                width=5, state='readonly')
+        ch_menu.pack(side=tk.LEFT, padx=2)
+        ch_menu.bind('<<ComboboxSelected>>', lambda e: self.win.after(10, self._draw_graph))
+
+        tk.Label(fb, text='as:', bg='#1e1e1e', fg='#aaa', font=('Arial', 9)).pack(side=tk.LEFT, padx=(6,2))
+        for val, txt in [('src','src'), ('dst','dst'), ('either','either')]:
+            tk.Radiobutton(fb, text=txt, variable=self._gf_ch_dir, value=val,
+                           bg='#1e1e1e', fg='#ccc', selectcolor='#333',
+                           activebackground='#1e1e1e',
+                           command=self._draw_graph).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(fb, text='✕ clear', bg='#2a2a2a', fg='#aaa', relief=tk.FLAT,
+                  font=('Arial', 8),
+                  command=self._graph_filter_clear).pack(side=tk.RIGHT, padx=8, pady=2)
 
         self.gc = tk.Canvas(self.graph_frame, bg=BG_COLOR, highlightthickness=0)
         self.gc.pack(fill=tk.BOTH, expand=True)
@@ -342,6 +384,48 @@ class RoutingWindow:
 
         self._tip = tk.Label(self.graph_frame, text='', bg='#333', fg='#eee',
                               font=('Arial', 8), relief=tk.FLAT, padx=4, pady=2)
+
+    def _graph_filter_clear(self):
+        self._gf_audio.set(True)
+        self._gf_midi.set(True)
+        self._gf_midi_ch.set('All')
+        self._gf_ch_dir.set('either')
+        self._selected_node = None
+        self.win.after(10, self._draw_graph)
+
+    def _send_passes_filter(self, send: dict) -> bool:
+        """Return True if this send should be visible given current graph filters."""
+        show_audio = self._gf_audio.get()
+        show_midi  = self._gf_midi.get()
+        ch_filter  = self._gf_midi_ch.get()   # 'All' or '1'..'16'
+        ch_dir     = self._gf_ch_dir.get()    # 'src', 'dst', 'either'
+
+        ha = send.get('has_audio', False)
+        hm = send.get('has_midi',  False)
+
+        # Type visibility
+        visible_audio = ha and show_audio
+        visible_midi  = hm and show_midi
+
+        if not visible_audio and not visible_midi:
+            return False
+
+        # MIDI channel filter (only applies when a specific channel is chosen)
+        if visible_midi and ch_filter != 'All':
+            # Both dropdown and Ch labels are now 0-based
+            wanted = f'Ch {ch_filter}'
+            src_ch = send.get('midi_src_ch') or ''
+            dst_ch = send.get('midi_dst_ch') or ''
+            if ch_dir == 'src':
+                ch_ok = (src_ch == wanted)
+            elif ch_dir == 'dst':
+                ch_ok = (dst_ch == wanted)
+            else:  # either
+                ch_ok = (src_ch == wanted or dst_ch == wanted)
+            if not ch_ok:
+                visible_midi = False
+
+        return visible_audio or visible_midi
 
     def _layout_nodes(self):
         n = len(self.project.tracks)
@@ -402,6 +486,7 @@ class RoutingWindow:
         self._draw_graph()
 
     def _gr(self, e):
+        """Release: if no drag, treat as selection click."""
         if not self._drag_moved:
             nd = self._node_at(e.x, e.y)
             if nd is not None:
@@ -441,34 +526,49 @@ class RoutingWindow:
             c.create_text(400, 300, text='No project loaded', fill='#555', font=('Arial', 16))
             return
 
-        sel = self._selected_node
+        sel = self._selected_node          # None = show all
         tracks = self.project.tracks
 
+        # Build sets of nodes and edges relevant to the selection,
+        # taking the current send filter into account.
         if sel is not None:
-            connected_to: set   = {sel}
+            connected_to:   set = {sel}
             connected_from: set = {sel}
-            active_edges: set   = set()
+            active_edges:   set = set()
 
             for send in tracks[sel]['sends']:
-                dst = send['dst_idx']
-                connected_to.add(dst)
-                active_edges.add((sel, dst))
+                if self._send_passes_filter(send):
+                    dst = send['dst_idx']
+                    connected_to.add(dst)
+                    active_edges.add((sel, dst))
             for recv in tracks[sel]['receives']:
+                # Build a synthetic send dict for the receive so we can filter it
                 src = recv['src_idx']
-                connected_from.add(src)
-                active_edges.add((src, sel))
+                recv_as_send = {
+                    'has_audio':   recv.get('has_audio', False),
+                    'has_midi':    recv.get('has_midi',  False),
+                    'midi_src_ch': recv.get('midi_src_ch'),
+                    'midi_dst_ch': recv.get('midi_dst_ch'),
+                    'src_ach':     recv.get('src_ach', 0),
+                    'dst_ach':     recv.get('dst_ach', 0),
+                    'fader_mode':  recv.get('fader_mode', 0),
+                }
+                if self._send_passes_filter(recv_as_send):
+                    connected_from.add(src)
+                    active_edges.add((src, sel))
 
             visible_nodes = connected_to | connected_from
         else:
             visible_nodes = set(self._node_pos.keys())
-            active_edges  = None
+            active_edges  = None   # draw all, dimming handled per-edge
 
         R  = max(22, int(28 * self._scale))
         fs = max(7,  int(9  * self._scale))
-        lfs = max(6, int(8  * self._scale))
+        lfs = max(6, int(8  * self._scale))   # label font size
         drawn: set = set()
 
         def build_send_label(send: dict) -> str:
+            """Build a compact info string for an edge label."""
             parts = []
             if send.get('has_audio'):
                 ach = f"{decode_audio_ch(send['src_ach'])}→{decode_audio_ch(send['dst_ach'])}"
@@ -487,6 +587,7 @@ class RoutingWindow:
             drawn.add(key)
             sx2, sy2 = self._w2s(*self._node_pos[src])
             dx2, dy2 = self._w2s(*self._node_pos[dst])
+            # Curved midpoint offset (perpendicular to the line)
             mx_ = (sx2 + dx2) / 2 + (dy2 - sy2) * 0.18
             my_ = (sy2 + dy2) / 2 + (sx2 - dx2) * 0.18
             w  = max(1, int(2 * self._scale))
@@ -497,14 +598,18 @@ class RoutingWindow:
                           smooth=True, fill=fill, width=lw, dash=dash,
                           arrow=tk.LAST, arrowshape=ar)
 
+            # Draw label on active edges when a node is selected
             if not alpha_dim and sel is not None and send is not None:
                 label = build_send_label(send)
                 if label:
+                    # Perpendicular unit vector (points "above" the line)
                     dx_ = dx2 - sx2
                     dy_ = dy2 - sy2
                     length = math.hypot(dx_, dy_) or 1
+                    # Perpendicular: rotate 90° CCW = (-dy, dx)
                     px_ = -dy_ / length
                     py_ =  dx_ / length
+                    # Offset 10px above the curve midpoint
                     offset = 10
                     lx = mx_ + px_ * offset
                     ly = my_ + py_ * offset
@@ -520,8 +625,16 @@ class RoutingWindow:
                 dst = send['dst_idx']
                 if dst not in self._node_pos:
                     continue
+                # Apply connection type + MIDI channel filter
+                if not self._send_passes_filter(send):
+                    continue
                 ha, hm = send['has_audio'], send['has_midi']
-                color = BOTH_COLOR if (ha and hm) else (MIDI_COLOR if hm else AUDIO_COLOR)
+                # Recompute color after filter (audio may be hidden)
+                show_audio = self._gf_audio.get()
+                show_midi  = self._gf_midi.get()
+                ha_vis = ha and show_audio
+                hm_vis = hm and show_midi
+                color = BOTH_COLOR if (ha_vis and hm_vis) else (MIDI_COLOR if hm_vis else AUDIO_COLOR)
                 is_active = (active_edges is None) or ((ti, dst) in active_edges)
                 draw_edge(ti, dst, color, alpha_dim=not is_active, send=send)
 
@@ -560,6 +673,7 @@ class RoutingWindow:
                 ow      = max(1, int(2 * self._scale))
                 text_col = NODE_TEXT
             else:
+                # dimmed node — not connected to selection
                 fill    = '#222222'
                 outline = '#444444'
                 ow      = 1
@@ -746,6 +860,7 @@ class RoutingWindow:
                 return f"[{idx+1}] {tracks[idx]['name'] or f'Track {idx+1}'}"
             return f'[{idx+1}] ?'
 
+        # Collect all connections
         conns = []
         for si, track in enumerate(tracks):
             for send in track['sends']:
@@ -761,6 +876,7 @@ class RoutingWindow:
             return
 
         def send_detail(s) -> Tuple[str, List[Tuple[str, str]]]:
+            """Returns (tag, [(text, tag), ...])"""
             lines = []
             if s['has_audio'] and s['has_midi']:
                 tag = 'both'
@@ -851,12 +967,10 @@ class MIDICCEditorGUI:
         self._track_item_ids: List[str] = []
         self._item_to_indices: Dict[str, Tuple[int,int,int]] = {}
         self._routing_win: Optional[RoutingWindow] = None
+        self._filter_var = tk.StringVar()   # initialised before _create_widgets
         self._create_widgets()
         self._create_menu()
-        # Keyboard shortcuts
-        self.root.bind('<Control-s>',        lambda e: self.save_file())
-        self.root.bind('<Control-S>',        lambda e: self.save_file_as())
-        self.root.bind('<Control-o>',        lambda e: self.open_file())
+        self._filter_var.trace_add('write', lambda *_: self._apply_filter())
 
     def _create_menu(self):
         mb = tk.Menu(self.root)
@@ -864,12 +978,11 @@ class MIDICCEditorGUI:
 
         fm = tk.Menu(mb, tearoff=0)
         mb.add_cascade(label="File", menu=fm)
-        fm.add_command(label="Open RPP File...  Ctrl+O", command=self.open_file)
+        fm.add_command(label="Open RPP File...", command=self.open_file)
+        fm.add_command(label="Save",       command=self.save_file,    state=tk.DISABLED)
+        fm.add_command(label="Save As...", command=self.save_file_as, state=tk.DISABLED)
         fm.add_separator()
-        fm.add_command(label="Save              Ctrl+S",   command=self.save_file,    state=tk.DISABLED)
-        fm.add_command(label="Save As...        Ctrl+Shift+S", command=self.save_file_as, state=tk.DISABLED)
-        fm.add_separator()
-        fm.add_command(label="Exit", command=self._on_close)
+        fm.add_command(label="Exit", command=self.root.quit)
 
         vm = tk.Menu(mb, tearoff=0)
         mb.add_cascade(label="View", menu=vm)
@@ -882,30 +995,22 @@ class MIDICCEditorGUI:
         vm.add_command(label="🔀  Routing Visualisation", command=self.open_routing)
 
         self.file_menu = fm
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    def _on_close(self):
-        if self.project.modified:
-            ans = messagebox.askyesnocancel(
-                "Unsaved Changes",
-                "You have unsaved changes. Save before closing?")
-            if ans is None:        # Cancel
-                return
-            if ans:                # Yes
-                if not self._do_save():
-                    return         # save failed / cancelled — don't close
-        self.root.destroy()
 
     def _create_widgets(self):
         top = ttk.Frame(self.root, padding="10")
         top.pack(fill=tk.X)
         ttk.Label(top, text="File:").pack(side=tk.LEFT)
-        self.file_label = ttk.Label(top, text="No file loaded", foreground="gray")
+        self.file_label = tk.Label(top, text="No file loaded", fg="#888888",
+                                    bg=self.root.cget('bg'), font=('Arial', 9))
         self.file_label.pack(side=tk.LEFT, padx=10)
-        ttk.Button(top, text="Open File",   command=self.open_file).pack(side=tk.RIGHT)
-        ttk.Button(top, text="💾 Save As…", command=self.save_file_as).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(top, text="💾 Save",     command=self.save_file).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(top, text="🔀 Routing",  command=self.open_routing).pack(side=tk.RIGHT, padx=6)
+
+        # Save buttons in top bar (always visible)
+        self.save_as_btn = ttk.Button(top, text="Save As…", command=self.save_file_as, state=tk.DISABLED)
+        self.save_as_btn.pack(side=tk.RIGHT, padx=2)
+        self.save_btn = ttk.Button(top, text="💾 Save", command=self.save_file, state=tk.DISABLED)
+        self.save_btn.pack(side=tk.RIGHT, padx=2)
+        ttk.Button(top, text="Open File",  command=self.open_file).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(top, text="🔀 Routing", command=self.open_routing).pack(side=tk.RIGHT, padx=6)
 
         main = ttk.Frame(self.root)
         main.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
@@ -914,12 +1019,24 @@ class MIDICCEditorGUI:
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         hf = ttk.Frame(left)
-        hf.pack(fill=tk.X, pady=(0,4))
+        hf.pack(fill=tk.X, pady=(0,2))
         ttk.Label(hf, text="Tracks & FX", font=('Arial',10,'bold')).pack(side=tk.LEFT)
         bf = ttk.Frame(hf)
         bf.pack(side=tk.RIGHT)
         ttk.Button(bf, text="⊟ Fold All",   command=self.fold_all,   width=10).pack(side=tk.LEFT, padx=2)
         ttk.Button(bf, text="⊞ Unfold All", command=self.unfold_all, width=11).pack(side=tk.LEFT, padx=2)
+
+        # ── Filter bar ──────────────────────────────────────────────────
+        ff = ttk.Frame(left)
+        ff.pack(fill=tk.X, pady=(0,4))
+        ttk.Label(ff, text="🔍", font=('Arial', 10)).pack(side=tk.LEFT)
+        # _filter_var already created in __init__ — just bind Entry to it
+        self._filter_entry = ttk.Entry(ff, textvariable=self._filter_var)
+        self._filter_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self._filter_clear = ttk.Button(ff, text="✕", width=2,
+                                         command=lambda: self._filter_var.set(''))
+        self._filter_clear.pack(side=tk.LEFT)
+        self._filter_active = False   # tracks whether filter is currently applied
 
         ts = ttk.Scrollbar(left)
         ts.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1043,25 +1160,16 @@ class MIDICCEditorGUI:
             filetypes=[("REAPER Project", "*.RPP *.rpp"), ("All Files", "*.*")])
         if not fp:
             return
-        # Warn about unsaved changes before opening a new file
-        if self.project.modified:
-            ans = messagebox.askyesnocancel(
-                "Unsaved Changes",
-                "You have unsaved changes. Save before opening a new file?")
-            if ans is None:
-                return
-            if ans:
-                if not self._do_save():
-                    return
         try:
             self.project.load_file(fp)
-            self.file_label.config(text=os.path.basename(fp), foreground="black")
+            self.file_label.config(text=os.path.basename(fp), fg='#ffffff')
             self.populate_tree()
             self.status.config(text=f"Loaded: {fp}")
-            self.file_menu.entryconfig("Save              Ctrl+S",       state=tk.NORMAL)
-            self.file_menu.entryconfig("Save As...        Ctrl+Shift+S", state=tk.NORMAL)
+            self.file_menu.entryconfig("Save",       state=tk.NORMAL)
+            self.file_menu.entryconfig("Save As...", state=tk.NORMAL)
+            self.save_btn.config(state=tk.NORMAL)
+            self.save_as_btn.config(state=tk.NORMAL)
             self.show_stats()
-            self._update_title()
             try:
                 if self._routing_win and self._routing_win.win.winfo_exists():
                     self._routing_win.project = self.project
@@ -1073,82 +1181,90 @@ class MIDICCEditorGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load file:\n{str(e)}")
 
-    def _do_save(self) -> bool:
-        """Internal save — uses Save As dialog if no filepath yet. Returns True on success."""
-        if not self.project.filepath:
-            return self._do_save_as()
+    def save_file(self):
+        if not self.project.modified:
+            messagebox.showinfo("Info", "No changes to save"); return
         try:
             self.project.save_file()
             self.status.config(text=f"Saved: {self.project.filepath}")
-            self._update_title()
-            return True
+            messagebox.showinfo("Success", "File saved successfully")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save:\n{str(e)}")
-            return False
-
-    def _do_save_as(self) -> bool:
-        """Show Save As dialog, write file, update state. Returns True on success."""
-        initial = os.path.basename(self.project.filepath) if self.project.filepath else ''
-        fp = filedialog.asksaveasfilename(
-            title="Save As",
-            initialfile=initial,
-            defaultextension=".RPP",
-            filetypes=[("REAPER Project", "*.RPP *.rpp"), ("All Files", "*.*")])
-        if not fp:
-            return False
-        try:
-            self.project.save_file(fp)
-            self.project.filepath = fp          # ← update so future Ctrl+S targets this file
-            self.file_label.config(text=os.path.basename(fp), foreground="black")
-            self.status.config(text=f"Saved: {fp}")
-            self._update_title()
-            messagebox.showinfo("Saved", f"File saved to:\n{fp}")
-            return True
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save:\n{str(e)}")
-            return False
-
-    def save_file(self):
-        """Ctrl+S — save to current path, or prompt if none."""
-        if not self.project.filepath:
-            self._do_save_as()
-            return
-        self._do_save()
 
     def save_file_as(self):
-        """Ctrl+Shift+S — always prompt for a new filename."""
-        if not self.project.filepath and not self.project.tracks:
-            messagebox.showinfo("No project", "Please open a REAPER project first.")
-            return
-        self._do_save_as()
-
-    def _update_title(self):
-        name = os.path.basename(self.project.filepath) if self.project.filepath else "No file"
-        mod  = " •" if self.project.modified else ""
-        self.root.title(f"REAPER MIDI CC Editor — {name}{mod}")
+        fp = filedialog.asksaveasfilename(title="Save As", defaultextension=".RPP",
+                                          filetypes=[("REAPER Project","*.RPP"),("All Files","*.*")])
+        if fp:
+            try:
+                self.project.save_file(fp)
+                self.file_label.config(text=os.path.basename(fp), fg='#ffffff')
+                self.status.config(text=f"Saved: {fp}")
+                messagebox.showinfo("Success", "File saved successfully")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save:\n{str(e)}")
 
     # ── Tree ─────────────────────────────────────────────────────────────
 
     def populate_tree(self):
+        """Rebuild tree, honouring the current filter string."""
+        query = self._filter_var.get().strip().lower() if hasattr(self, '_filter_var') else ''
+        filtering = bool(query)
+
         for item in self.tree.get_children():
             self.tree.delete(item)
         self._track_item_ids = []
         self._item_to_indices = {}
+
         for ti, track in enumerate(self.project.tracks):
-            name = track['name'] or f"Track {ti+1}"
-            tid = self.tree.insert('', 'end', text=name, values=('Track','',''),
-                                    tags=('track',), open=True)
-            self._track_item_ids.append(tid)
+            track_name = track['name'] or f"Track {ti+1}"
+            track_id = None   # inserted lazily
+
             for fi, fx in enumerate(track['fx_list']):
-                fid = self.tree.insert(tid, 'end', text=fx['name'],
-                                        values=(fx['type'],'',''), tags=('fx',), open=True)
+                fx_id = None   # inserted lazily
+
                 for mi, mod in enumerate(fx['modulations']):
-                    if mod['midi_cc'] is not None:
-                        iid = self.tree.insert(fid, 'end', text=mod['param_name'],
-                                               values=('Param', f"CC {mod['midi_cc']}",
-                                                       f"{mod['midi_channel']}"),
-                                               tags=('modulation', str(ti), str(fi), str(mi)))
-                        self._item_to_indices[iid] = (ti, fi, mi)
+                    if mod['midi_cc'] is None:
+                        continue
+                    # Filter: skip param rows that don't match (when filter is active)
+                    if filtering and query not in mod['param_name'].lower():
+                        continue
+
+                    # Ensure track header exists (inserted once per track)
+                    if track_id is None:
+                        track_id = self.tree.insert(
+                            '', 'end', text=track_name,
+                            values=('Track', '', ''),
+                            tags=('track',), open=True)
+                        self._track_item_ids.append(track_id)
+
+                    # Ensure FX header exists under this track
+                    if fx_id is None:
+                        fx_id = self.tree.insert(
+                            track_id, 'end', text=fx['name'],
+                            values=(fx['type'], '', ''),
+                            tags=('fx',), open=True)
+
+                    iid = self.tree.insert(
+                        fx_id, 'end',
+                        text=mod['param_name'],
+                        values=('Param', f"CC {mod['midi_cc']}", f"{mod['midi_channel']}"),
+                        tags=('modulation', str(ti), str(fi), str(mi)))
+                    self._item_to_indices[iid] = (ti, fi, mi)
+
+        # Update filter entry appearance to signal active state
+        if hasattr(self, '_filter_entry'):
+            self._filter_entry.configure(
+                style='Filter.TEntry' if filtering else 'TEntry')
+
+    def _apply_filter(self):
+        """Called whenever the filter text changes."""
+        self.populate_tree()
+        q = self._filter_var.get().strip()
+        if q:
+            total = len(self._item_to_indices)
+            self.status.config(text=f"Filter '{q}' — {total} param(s) shown")
+        else:
+            self.status.config(text="Filter cleared")
 
     # ── Selection ────────────────────────────────────────────────────────
 
@@ -1214,12 +1330,11 @@ class MIDICCEditorGUI:
             if self.project.update_midi_cc(t, f, m, cc, ch, bus): ok += 1
             else: fail += 1
         self.populate_tree()
-        self._update_title()
         parts = ([f"CC→{ncc}"] if do_cc else []) + ([f"Ch→{nch}"] if do_ch else []) + ([f"Bus→{nbus}"] if do_bus else [])
         summary = ",  ".join(parts)
         if fail == 0:
-            self.status.config(text=f"Updated {ok} row(s): {summary}  (unsaved)")
-            messagebox.showinfo("Done", f"Updated {ok} parameter(s):\n{summary}\n\nRemember to save (Ctrl+S).")
+            self.status.config(text=f"Updated {ok} row(s): {summary}  (not saved yet)")
+            messagebox.showinfo("Done", f"Updated {ok} parameter(s):\n{summary}")
         else:
             self.status.config(text=f"Updated {ok}, skipped {fail}")
             messagebox.showwarning("Partial", f"Updated: {ok}\nSkipped (no MIDIPLINK): {fail}")
@@ -1243,9 +1358,6 @@ class MIDICCEditorGUI:
             "  src = val & 0x1F\n"
             "  dst = val >> 5\n"
             "  (per CockosWiki docs)\n\n"
-            "Ctrl+S        Save\n"
-            "Ctrl+Shift+S  Save As\n"
-            "Ctrl+O        Open\n\n"
             "Ctrl/Shift+click to multi-select\n"
             "Click 🔀 Routing to visualise."
         )
