@@ -15,12 +15,16 @@ slider4:2<1,16,1>High zone input channel
 slider5:0<0,1,1>Other MIDI (0=Pass, 1=Block)
 
 @init
-// Per-note zone stack to keep Note Off consistent after changing split.
-// zone: 0 = low, 1 = high
 STACK_MAX = 16;
-memset(stack_sp, 0, 128);         // stack pointers per note
-// stack_data indexed as: (note*STACK_MAX + depth)
+memset(stack_sp,   0, 128);
 memset(stack_data, 0, 128*STACK_MAX);
+
+// --- activity trackers ---
+low_last_note  = -1;  low_last_vel  = 0;  low_active  = 0;
+high_last_note = -1;  high_last_vel = 0;  high_active = 0;
+out_last_note  = -1;  out_last_vel  = 0;  out_active  = 0;
+low_blocked    = 0;
+high_blocked   = 0;
 
 function push_zone(note, zone) local(sp, idx) (
   sp = stack_sp[note];
@@ -28,10 +32,6 @@ function push_zone(note, zone) local(sp, idx) (
     idx = note*STACK_MAX + sp;
     stack_data[idx] = zone;
     stack_sp[note] = sp + 1;
-  ) : (
-    // overflow: drop newest push (safe fallback)
-    // alternatively could shift, but keep it simple
-    0;
   );
 );
 
@@ -43,9 +43,7 @@ function pop_zone(note) local(sp, idx, zone) (
     zone = stack_data[idx];
     stack_sp[note] = sp;
     zone;
-  ) : (
-    -1;
-  );
+  ) : -1;
 );
 
 function peek_zone(note) local(sp, idx) (
@@ -57,9 +55,7 @@ function peek_zone(note) local(sp, idx) (
 );
 
 function zone_for_note(note) (
-  note < slider1 ? 0 :
-  note > slider1 ? 1 :
-  slider4;
+  note < slider1 ? 0 : 1;
 );
 
 function set_chan(statusbyte, ch1to16) (
@@ -72,37 +68,59 @@ function send_to_zone(offset, statusbyte, msg23, zone) (
 );
 
 function send_other(offset, statusbyte, msg23) (
-  mode = slider5;
-  mode == 0 ? (
-    midisend(offset, statusbyte, msg23);
-  ) : (
-    // block
-  );
+  slider5 == 0 ? midisend(offset, statusbyte, msg23);
+);
+
+function note_name(n) local(oct, nn) (
+  oct = (n / 12) | 0;
+  nn  = n % 12;
+  nn == 0  ? "C"  :
+  nn == 1  ? "C#" :
+  nn == 2  ? "D"  :
+  nn == 3  ? "D#" :
+  nn == 4  ? "E"  :
+  nn == 5  ? "F"  :
+  nn == 6  ? "F#" :
+  nn == 7  ? "G"  :
+  nn == 8  ? "G#" :
+  nn == 9  ? "A"  :
+  nn == 10 ? "A#" : "B";
 );
 
 @slider
-// (No heavy work needed here)
 
 @block
 while (midirecv(offset, msg1, msg23)) (
   status = msg1 & 0xF0;
-  in_ch = msg1 & 0x0F;
-  note = msg23 & 0xFF;
-  vel = (msg23 >> 8) & 0xFF;
-  zone = zone_for_note(note);
-  accepted = (zone == 0 && in_ch == slider3 - 1) || (zone == 1 && in_ch == slider4 - 1);
+  in_ch  = msg1 & 0x0F;
+  note   = msg23 & 0xFF;
+  vel    = (msg23 >> 8) & 0xFF;
+  zone   = zone_for_note(note);
+
+  accepted = (zone == 0 && in_ch == slider3-1) || (zone == 1 && in_ch == slider4-1);
+
   status == 0x90 ? (
     accepted ? (
       vel > 0 ? (
         push_zone(note, zone);
         send_to_zone(offset, msg1, msg23, zone);
+        // track activity
+        zone == 0 ? (
+          low_last_note = note; low_last_vel = vel; low_active = 1;
+        ) : (
+          high_last_note = note; high_last_vel = vel; high_active = 1;
+        );
+        out_last_note = note; out_last_vel = vel; out_active = 1;
       ) : (
         zone = pop_zone(note);
         zone < 0 ? zone = zone_for_note(note);
-        send_to_zone(offset, (msg1 & 0xF0) | (msg1 & 0x0F), (0x00 << 8) | note, zone);
+        send_to_zone(offset, msg1, msg23, zone);
+        zone == 0 ? low_active = 0 : high_active = 0;
+        out_active = 0;
       );
     ) : (
-      // not accepted, skip
+      // blocked — log which zone rejected it
+      zone == 0 ? low_blocked  += 1 : high_blocked += 1;
     );
   ) :
   status == 0x80 ? (
@@ -110,8 +128,10 @@ while (midirecv(offset, msg1, msg23)) (
       zone = pop_zone(note);
       zone < 0 ? zone = zone_for_note(note);
       send_to_zone(offset, msg1, msg23, zone);
+      zone == 0 ? low_active = 0 : high_active = 0;
+      out_active = 0;
     ) : (
-      // skip
+      zone == 0 ? low_blocked += 1 : high_blocked += 1;
     );
   ) :
   status == 0xA0 ? (
@@ -119,22 +139,178 @@ while (midirecv(offset, msg1, msg23)) (
       zone = peek_zone(note);
       zone < 0 ? zone = zone_for_note(note);
       send_to_zone(offset, msg1, msg23, zone);
-    ) : (
-      // skip
     );
   ) :
-  (
-    send_other(offset, msg1, msg23);
+  send_other(offset, msg1, msg23);
+);
+
+@gfx 520 340
+gfx_clear = 0x111118;
+
+function draw_box(x, y, w, h, r, g, b) (
+  gfx_r=r; gfx_g=g; gfx_b=b; gfx_a=1;
+  gfx_rect(x, y, w, h);
+);
+
+function draw_note(n) (
+  n < 0 ? (
+    gfx_drawstr("---");
+  ) : (
+    oct = (n/12)|0;
+    nn  = n%12;
+    nn==0  ? gfx_drawstr("C")  :
+    nn==1  ? gfx_drawstr("C#") :
+    nn==2  ? gfx_drawstr("D")  :
+    nn==3  ? gfx_drawstr("D#") :
+    nn==4  ? gfx_drawstr("E")  :
+    nn==5  ? gfx_drawstr("F")  :
+    nn==6  ? gfx_drawstr("F#") :
+    nn==7  ? gfx_drawstr("G")  :
+    nn==8  ? gfx_drawstr("G#") :
+    nn==9  ? gfx_drawstr("A")  :
+    nn==10 ? gfx_drawstr("A#") :
+             gfx_drawstr("B");
+    gfx_drawnumber(oct-1, 0);
   );
 );
 
-@gfx 200 80
-gfx_setfont(1, "Arial", 16);
-gfx_x = 10; gfx_y = 10;
-gfx_printf("Split: %d   Out ch: %d   Low in: %d   High in: %d", slider1, slider2, slider3, slider4);
+// ── TITLE ───────────────────────────────────────────────
+draw_box(0, 0, gfx_w, 26, 0.15, 0.3, 0.6);
+gfx_setfont(1,"Arial",14,'b');
+gfx_r=1; gfx_g=1; gfx_b=1; gfx_a=1;
+gfx_x=10; gfx_y=5;
+gfx_drawstr("MIDI Keyboard Split Filter");
 
-gfx_setfont(1, "Arial", 12);
-gfx_x = 10; gfx_y = 55;
-mode = slider5;
-mode == 0 ? gfx_printf("Other MIDI: PASS") :
-gfx_printf("Other MIDI: BLOCK");
+// ── KEYBOARD SPLIT VISUALISER ───────────────────────────
+// Draw a mini 2-octave-style bar showing split point
+kx=10; ky=34; kw=gfx_w-20; kh=28;
+split_pct = slider1 / 127;
+split_px  = (kx + split_pct * kw) | 0;
+
+// low zone bar
+draw_box(kx, ky, split_px-kx, kh, 0.1, 0.35, 0.55);
+// high zone bar
+draw_box(split_px, ky, kx+kw-split_px, kh, 0.45, 0.15, 0.5);
+// split line
+gfx_r=1; gfx_g=1; gfx_b=0.2; gfx_a=1;
+gfx_line(split_px, ky, split_px, ky+kh);
+
+// zone labels
+gfx_setfont(1,"Arial",11,0);
+gfx_r=0.5; gfx_g=0.85; gfx_b=1; gfx_a=1;
+gfx_x=kx+4; gfx_y=ky+8;
+gfx_drawstr("LOW  ch:");
+gfx_drawnumber(slider3,0);
+
+gfx_r=0.85; gfx_g=0.5; gfx_b=1; gfx_a=1;
+gfx_x=split_px+6; gfx_y=ky+8;
+gfx_drawstr("HIGH  ch:");
+gfx_drawnumber(slider4,0);
+
+// split note label (centred on split line)
+gfx_setfont(1,"Arial",10,0);
+gfx_r=1; gfx_g=1; gfx_b=0.3; gfx_a=1;
+gfx_x=split_px-10; gfx_y=ky+kh+3;
+gfx_drawstr("split:");
+draw_note(slider1|0);
+
+// ── OUTPUT CHANNEL BADGE ────────────────────────────────
+draw_box(kx, ky+kh+18, kw, 20, 0.1, 0.25, 0.1);
+gfx_setfont(1,"Arial",12,0);
+gfx_r=0.4; gfx_g=1; gfx_b=0.4; gfx_a=1;
+gfx_x=kx+6; gfx_y=ky+kh+21;
+gfx_drawstr("Output channel: ");
+gfx_drawnumber(slider2,0);
+gfx_drawstr("     Other MIDI: ");
+slider5==0 ? gfx_drawstr("PASS") : (gfx_r=1; gfx_g=0.3; gfx_b=0.3; gfx_drawstr("BLOCK"));
+
+// ── THREE CHANNEL PANELS ─────────────────────────────────
+// Panel geometry
+py   = ky+kh+46;
+pw   = (gfx_w-40)/3;
+ph   = 130;
+gap  = 10;
+px0  = 10;
+px1  = px0 + pw + gap;
+px2  = px1 + pw + gap;
+
+// ---- LOW IN panel ----
+low_active ? (
+  draw_box(px0, py, pw, ph, 0.05, 0.25, 0.38);
+  gfx_r=0.5; gfx_g=0.9; gfx_b=1;
+) : (
+  draw_box(px0, py, pw, ph, 0.08, 0.1, 0.14);
+  gfx_r=0.35; gfx_g=0.5; gfx_b=0.6;
+);
+gfx_a=1;
+gfx_setfont(1,"Arial",11,'b');
+gfx_x=px0+6; gfx_y=py+6;
+gfx_drawstr("LOW IN");
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px0+6; gfx_y=py+24;
+gfx_drawstr("ch: "); gfx_drawnumber(slider3,0);
+gfx_x=px0+6; gfx_y=py+42;
+gfx_drawstr("note: ");
+gfx_setfont(1,"Arial",18,'b');
+gfx_x=px0+6; gfx_y=py+58;
+draw_note(low_last_note);
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px0+6; gfx_y=py+84;
+gfx_drawstr("vel: ");
+low_last_note>=0 ? gfx_drawnumber(low_last_vel,0) : gfx_drawstr("--");
+gfx_x=px0+6; gfx_y=py+100;
+gfx_r=1; gfx_g=0.4; gfx_b=0.4;
+gfx_drawstr("blocked: "); gfx_drawnumber(low_blocked,0);
+
+// ---- HIGH IN panel ----
+high_active ? (
+  draw_box(px1, py, pw, ph, 0.28, 0.08, 0.35);
+  gfx_r=0.9; gfx_g=0.55; gfx_b=1;
+) : (
+  draw_box(px1, py, pw, ph, 0.1, 0.08, 0.14);
+  gfx_r=0.55; gfx_g=0.35; gfx_b=0.6;
+);
+gfx_a=1;
+gfx_setfont(1,"Arial",11,'b');
+gfx_x=px1+6; gfx_y=py+6;
+gfx_drawstr("HIGH IN");
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px1+6; gfx_y=py+24;
+gfx_drawstr("ch: "); gfx_drawnumber(slider4,0);
+gfx_x=px1+6; gfx_y=py+42;
+gfx_drawstr("note: ");
+gfx_setfont(1,"Arial",18,'b');
+gfx_x=px1+6; gfx_y=py+58;
+draw_note(high_last_note);
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px1+6; gfx_y=py+84;
+gfx_drawstr("vel: ");
+high_last_note>=0 ? gfx_drawnumber(high_last_vel,0) : gfx_drawstr("--");
+gfx_x=px1+6; gfx_y=py+100;
+gfx_r=1; gfx_g=0.4; gfx_b=0.4;
+gfx_drawstr("blocked: "); gfx_drawnumber(high_blocked,0);
+
+// ---- OUT panel ----
+out_active ? (
+  draw_box(px2, py, pw, ph, 0.08, 0.28, 0.1);
+  gfx_r=0.4; gfx_g=1; gfx_b=0.45;
+) : (
+  draw_box(px2, py, pw, ph, 0.08, 0.12, 0.08);
+  gfx_r=0.35; gfx_g=0.55; gfx_b=0.38;
+);
+gfx_a=1;
+gfx_setfont(1,"Arial",11,'b');
+gfx_x=px2+6; gfx_y=py+6;
+gfx_drawstr("OUT");
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px2+6; gfx_y=py+24;
+gfx_drawstr("ch: "); gfx_drawnumber(slider2,0);
+gfx_x=px2+6; gfx_y=py+42;
+gfx_drawstr("note: ");
+gfx_setfont(1,"Arial",18,'b');
+gfx_x=px2+6; gfx_y=py+58;
+draw_note(out_last_note);
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px2+6; gfx_y=py+84;
+gfx_drawstr("vel: ");
+out_last_note>=0 ? gfx_drawnumber(out_last_vel,0) : gfx_drawstr("--");
