@@ -8,27 +8,12 @@ about:
   When the pedal is released (CC64 returns to 0), all previously held notes are
   released (Note Off messages are sent).
 
-  FEATURES:
-  - Works in Omni mode (Channel = 0) or on a single MIDI channel (1..16).
-  - Holds any number of notes simultaneously while sustain is pressed.
-  - CC64 messages and all non-note messages are forwarded unchanged.
-  - Sustain engages at values > 0 and releases when it returns to 0.
-
-  USAGE:
-  - Put this JSFX between your MIDI input and instrument in REAPER so it
-    can intercept MIDI and forward events to the instrument.
-  - Use slider `Channel` to select 0 (omni) or a single MIDI channel.
-  - Press and hold your sustain pedal (CC64 > 0) — Note Offs will be
-    suppressed and notes will keep sounding. Release the pedal to release
-    all held notes at once.
-
 slider1:0<0,16,1>Channel (0=omni)
 
 in_pin:none
 out_pin:none
 
 @init
-// Track up to 10 simultaneous notes using dedicated variables (no arrays).
 slot0_note = -1; slot0_chan = 0; slot0_pressed = 0; slot0_sustain = 0;
 slot1_note = -1; slot1_chan = 0; slot1_pressed = 0; slot1_sustain = 0;
 slot2_note = -1; slot2_chan = 0; slot2_pressed = 0; slot2_sustain = 0;
@@ -42,30 +27,22 @@ slot9_note = -1; slot9_chan = 0; slot9_pressed = 0; slot9_sustain = 0;
 pedal_down = 0;
 
 @slider
-// Channel mapping:
-// slider1 = 0  -> omni (chan = -1, so all channels match)
-// slider1 = 1–16 -> MIDI channels 0–15
 s1   = slider1|0;
 chan = s1 ? (s1 - 1) : -1;
 
 @block
 while (midirecv(ts, msg, msg23)) (
-  status = msg & $xf0;          // message type
-  ch     = msg & $x0f;          // MIDI channel 0..15
-  d1     = msg23 & $xff;        // data1 (note number or CC number)
-  d2     = (msg23/256) & $xff;  // data2 (velocity or CC value)
+  status = msg & $xf0;
+  ch     = msg & $x0f;
+  d1     = msg23 & $xff;
+  d2     = (msg23/256) & $xff;
 
   in_chan = (chan < 0) || (ch == chan);
   is_note = (status == $x90) || (status == $x80);
 
-  // Sustain pedal handling (CC64)
   status == $xb0 && d1 == 64 ? (
-    // Forward the CC message unchanged
     midisend(ts, msg, msg23);
-
     sustain_on = d2 > 0;
-
-    // Pedal release: flush held notes
     (pedal_down && !sustain_on) ? (
       slot0_sustain ? (midisend(ts, $x80 + slot0_chan, slot0_note); slot0_sustain = 0; slot0_pressed ? 0 : slot0_note = -1;);
       slot1_sustain ? (midisend(ts, $x80 + slot1_chan, slot1_note); slot1_sustain = 0; slot1_pressed ? 0 : slot1_note = -1;);
@@ -78,16 +55,11 @@ while (midirecv(ts, msg, msg23)) (
       slot8_sustain ? (midisend(ts, $x80 + slot8_chan, slot8_note); slot8_sustain = 0; slot8_pressed ? 0 : slot8_note = -1;);
       slot9_sustain ? (midisend(ts, $x80 + slot9_chan, slot9_note); slot9_sustain = 0; slot9_pressed ? 0 : slot9_note = -1;);
     );
-
-    // Update pedal state
     pedal_down = sustain_on;
   ) : (
-    // Note processing
     is_note && in_chan ? (
       note = d1;
       vel  = d2;
-
-      // Find an existing slot for this note/channel and remember the first empty slot
       slot_idx = -1;
       empty_idx = -1;
 
@@ -115,7 +87,6 @@ while (midirecv(ts, msg, msg23)) (
 
       (slot_idx < 0) && (empty_idx >= 0) ? slot_idx = empty_idx;
 
-      // Initialize the slot when it is first claimed
       slot_idx == 0 ? (slot0_note = note; slot0_chan = ch;);
       slot_idx == 1 ? (slot1_note = note; slot1_chan = ch;);
       slot_idx == 2 ? (slot2_note = note; slot2_chan = ch;);
@@ -128,7 +99,6 @@ while (midirecv(ts, msg, msg23)) (
       slot_idx == 9 ? (slot9_note = note; slot9_chan = ch;);
 
       status == $x90 && vel > 0 ? (
-        // New note on: forward and mark as active
         midisend(ts, msg, msg23);
         slot_idx == 0 ? (slot0_pressed = 1; slot0_sustain = 0;);
         slot_idx == 1 ? (slot1_pressed = 1; slot1_sustain = 0;);
@@ -141,7 +111,6 @@ while (midirecv(ts, msg, msg23)) (
         slot_idx == 8 ? (slot8_pressed = 1; slot8_sustain = 0;);
         slot_idx == 9 ? (slot9_pressed = 1; slot9_sustain = 0;);
       ) : (
-        // Note Off (0x80) or Note On with vel = 0
         slot_idx == 0 ? slot0_pressed = 0;
         slot_idx == 1 ? slot1_pressed = 0;
         slot_idx == 2 ? slot2_pressed = 0;
@@ -154,7 +123,6 @@ while (midirecv(ts, msg, msg23)) (
         slot_idx == 9 ? slot9_pressed = 0;
 
         pedal_down && (slot_idx >= 0) ? (
-          // With pedal down, block Note Off and mark to release later
           slot_idx == 0 ? slot0_sustain = 1;
           slot_idx == 1 ? slot1_sustain = 1;
           slot_idx == 2 ? slot2_sustain = 1;
@@ -166,9 +134,7 @@ while (midirecv(ts, msg, msg23)) (
           slot_idx == 8 ? slot8_sustain = 1;
           slot_idx == 9 ? slot9_sustain = 1;
         ) : (
-          // No sustain: forward immediately
           midisend(ts, msg, msg23);
-          // Free the slot if no sustain keeps it around
           (slot_idx == 0) && (slot0_sustain == 0) ? (slot0_note = -1; slot0_chan = 0;);
           (slot_idx == 1) && (slot1_sustain == 0) ? (slot1_note = -1; slot1_chan = 0;);
           (slot_idx == 2) && (slot2_sustain == 0) ? (slot2_note = -1; slot2_chan = 0;);
@@ -182,8 +148,175 @@ while (midirecv(ts, msg, msg23)) (
         );
       );
     ) : (
-      // Non-note or other channel: forward unchanged
       midisend(ts, msg, msg23);
     );
   );
 );
+
+@gfx 460 300
+gfx_clear = 0x0f0f18;
+
+function draw_box(x, y, w, h, r, g, b) (
+  gfx_r=r; gfx_g=g; gfx_b=b; gfx_a=1;
+  gfx_rect(x, y, w, h);
+);
+
+function draw_note(n) (
+  n < 0 ? (
+    gfx_drawstr("---");
+  ) : (
+    oct = (n/12)|0;
+    nn  = n%12;
+    nn==0  ? gfx_drawstr("C")  :
+    nn==1  ? gfx_drawstr("C#") :
+    nn==2  ? gfx_drawstr("D")  :
+    nn==3  ? gfx_drawstr("D#") :
+    nn==4  ? gfx_drawstr("E")  :
+    nn==5  ? gfx_drawstr("F")  :
+    nn==6  ? gfx_drawstr("F#") :
+    nn==7  ? gfx_drawstr("G")  :
+    nn==8  ? gfx_drawstr("G#") :
+    nn==9  ? gfx_drawstr("A")  :
+    nn==10 ? gfx_drawstr("A#") :
+             gfx_drawstr("B");
+    gfx_drawnumber(oct-1, 0);
+  );
+);
+
+// helper: get note for slot i from memory-mapped vars
+// we store a copy into mem[0..9] each frame for easy indexed access
+mem[0] = slot0_note; mem[1] = slot1_note; mem[2] = slot2_note;
+mem[3] = slot3_note; mem[4] = slot4_note; mem[5] = slot5_note;
+mem[6] = slot6_note; mem[7] = slot7_note; mem[8] = slot8_note;
+mem[9] = slot9_note;
+mem[10] = slot0_chan; mem[11] = slot1_chan; mem[12] = slot2_chan;
+mem[13] = slot3_chan; mem[14] = slot4_chan; mem[15] = slot5_chan;
+mem[16] = slot6_chan; mem[17] = slot7_chan; mem[18] = slot8_chan;
+mem[19] = slot9_chan;
+mem[20] = slot0_pressed; mem[21] = slot1_pressed; mem[22] = slot2_pressed;
+mem[23] = slot3_pressed; mem[24] = slot4_pressed; mem[25] = slot5_pressed;
+mem[26] = slot6_pressed; mem[27] = slot7_pressed; mem[28] = slot8_pressed;
+mem[29] = slot9_pressed;
+mem[30] = slot0_sustain; mem[31] = slot1_sustain; mem[32] = slot2_sustain;
+mem[33] = slot3_sustain; mem[34] = slot4_sustain; mem[35] = slot5_sustain;
+mem[36] = slot6_sustain; mem[37] = slot7_sustain; mem[38] = slot8_sustain;
+mem[39] = slot9_sustain;
+
+// ── TITLE ────────────────────────────────────────────────
+draw_box(0, 0, gfx_w, 26, 0.15, 0.15, 0.35);
+gfx_setfont(1,"Arial",14,'b');
+gfx_r=1; gfx_g=1; gfx_b=1; gfx_a=1;
+gfx_x=10; gfx_y=5;
+gfx_drawstr("MIDI Sustain Hold");
+
+// ── PEDAL STATUS BAR ─────────────────────────────────────
+pedal_down ? (
+  draw_box(0, 28, gfx_w, 24, 0.05, 0.45, 0.15);
+  gfx_r=0.3; gfx_g=1; gfx_b=0.4;
+) : (
+  draw_box(0, 28, gfx_w, 24, 0.2, 0.1, 0.1);
+  gfx_r=0.6; gfx_g=0.3; gfx_b=0.3;
+);
+gfx_a=1;
+gfx_setfont(1,"Arial",13,'b');
+gfx_x=10; gfx_y=33;
+gfx_drawstr("PEDAL CC64: ");
+pedal_down ? gfx_drawstr("DOWN  [holding notes]") : gfx_drawstr("UP");
+
+// channel info
+gfx_setfont(1,"Arial",11,0);
+gfx_r=0.7; gfx_g=0.7; gfx_b=0.9; gfx_a=1;
+gfx_x=10; gfx_y=58;
+gfx_drawstr("Channel: ");
+chan < 0 ? gfx_drawstr("Omni (all)") : (
+  gfx_drawstr("Ch ");
+  gfx_drawnumber(chan+1, 0);
+);
+
+// ── SLOT GRID ────────────────────────────────────────────
+// 10 slots in 2 rows of 5
+gfx_setfont(1,"Arial",10,0);
+sw = (gfx_w - 20) / 5;  // slot width
+sh = 90;                  // slot height
+loop(10,
+  i = slot_i;  // we use slot_i as loop counter below
+  slot_i += 1; // increment manually since EEL2 loop doesn't give index
+);
+// EEL2 doesn't have loop index — draw manually for all 10
+slot_i = 0;
+
+function draw_slot(i, x, y, w, h) local(sn, sc, sp, ss) (
+  sn = mem[i];
+  sc = mem[10+i];
+  sp = mem[20+i];
+  ss = mem[30+i];
+
+  sn < 0 ? (
+    // empty slot
+    draw_box(x, y, w-4, h, 0.1, 0.1, 0.15);
+    gfx_r=0.3; gfx_g=0.3; gfx_b=0.35; gfx_a=1;
+    gfx_x=x+6; gfx_y=y+6;
+    gfx_drawstr("empty");
+  ) : (
+    ss ? (
+      // sustain held — pedal keeping it alive
+      draw_box(x, y, w-4, h, 0.3, 0.2, 0.0);
+      gfx_r=1; gfx_g=0.75; gfx_b=0.1;
+    ) : sp ? (
+      // physically pressed
+      draw_box(x, y, w-4, h, 0.05, 0.3, 0.15);
+      gfx_r=0.3; gfx_g=1; gfx_b=0.5;
+    ) : (
+      // active but neither pressed nor sustained (transitioning)
+      draw_box(x, y, w-4, h, 0.15, 0.15, 0.25);
+      gfx_r=0.6; gfx_g=0.6; gfx_b=0.9;
+    );
+    gfx_a=1;
+    // slot number
+    gfx_setfont(1,"Arial",9,0);
+    gfx_x=x+4; gfx_y=y+4;
+    gfx_drawnumber(i, 0);
+    // note name big
+    gfx_setfont(1,"Arial",18,'b');
+    gfx_x=x+6; gfx_y=y+18;
+    draw_note(sn);
+    // channel + state
+    gfx_setfont(1,"Arial",9,0);
+    gfx_x=x+6; gfx_y=y+52;
+    gfx_drawstr("ch:");
+    gfx_drawnumber(sc+1, 0);
+    gfx_x=x+6; gfx_y=y+64;
+    ss ? (gfx_r=1; gfx_g=0.75; gfx_b=0.1; gfx_drawstr("SUSTAIN")) :
+    sp ? (gfx_r=0.3; gfx_g=1;   gfx_b=0.5; gfx_drawstr("PRESSED")) :
+         (gfx_r=0.6; gfx_g=0.6; gfx_b=0.9; gfx_drawstr("active"));
+  );
+);
+
+row0_y = 76;
+row1_y = 76 + sh + 6;
+
+draw_slot(0, 10 + 0*sw, row0_y, sw, sh);
+draw_slot(1, 10 + 1*sw, row0_y, sw, sh);
+draw_slot(2, 10 + 2*sw, row0_y, sw, sh);
+draw_slot(3, 10 + 3*sw, row0_y, sw, sh);
+draw_slot(4, 10 + 4*sw, row0_y, sw, sh);
+draw_slot(5, 10 + 0*sw, row1_y, sw, sh);
+draw_slot(6, 10 + 1*sw, row1_y, sw, sh);
+draw_slot(7, 10 + 2*sw, row1_y, sw, sh);
+draw_slot(8, 10 + 3*sw, row1_y, sw, sh);
+draw_slot(9, 10 + 4*sw, row1_y, sw, sh);
+
+// ── LEGEND ───────────────────────────────────────────────
+ly = row1_y + sh + 8;
+draw_box(10, ly, gfx_w-20, 22, 0.08, 0.08, 0.12);
+gfx_setfont(1,"Arial",10,0);
+gfx_x=16; gfx_y=ly+5;
+draw_box(16, ly+6, 10, 10, 0.05, 0.3, 0.15);
+gfx_r=0.3; gfx_g=1; gfx_b=0.5; gfx_a=1;
+gfx_x=30; gfx_drawstr("pressed  ");
+draw_box(100, ly+6, 10, 10, 0.3, 0.2, 0.0);
+gfx_r=1; gfx_g=0.75; gfx_b=0.1; gfx_a=1;
+gfx_x=114; gfx_drawstr("sustain held  ");
+draw_box(220, ly+6, 10, 10, 0.1, 0.1, 0.15);
+gfx_r=0.3; gfx_g=0.3; gfx_b=0.35; gfx_a=1;
+gfx_x=234; gfx_drawstr("empty");
