@@ -3,42 +3,11 @@ author: tomaszpio
 version: 1.0.0
 about:
   This JSFX plugin implements a "note hold" function, active only within
-  a specified MIDI note range. It is intended for live playing or MIDI
-  processing where one key at a time is held, regardless of Note Off messages.
-
-  HOW IT WORKS:
-  - The plugin reacts only to Note On / Note Off messages.
-  - It works on:
-      • a selected MIDI channel (1–16), or
-      • all channels if Channel = 0 (omni mode).
-  - It is active only for notes within the [Low note .. High note] range.
-  - For any Note On with velocity > 0 in that range:
-      • The previously held note is turned off (Note Off is sent).
-      • The new note is turned on (Note On is sent) and stored as the
-        currently held note.
-  - Note Off messages and Note On with velocity = 0 in that range are ignored,
-    so they do NOT release the held note.
-  - All other MIDI messages (outside the note range, or on other channels,
-    or non-note messages) pass through unchanged.
-
-  SLIDERS:
-  - Channel (0=omni, 1–16 = specific MIDI channel)
-    • 0  => process all channels
-    • 1–16 => only process that MIDI channel
-  - Low note  – lower bound of the active note range (0–127)
-  - High note – upper bound of the active note range (0–127)
-    If Low note > High note, the plugin automatically swaps them.
-
-  TYPICAL USE CASES:
-  - Use a low octave on your keyboard as a "hold" controller area,
-    while higher notes play normally.
-  - Restrict hold behavior to a specific region (e.g., bass notes or keyswitches)
-    without affecting the rest of the keyboard.
+  a specified MIDI note range.
 
 slider1:0<0,16,1>Channel (0=omni)
 slider2:36<0,127,1>Low note
 slider3:84<0,127,1>High note
-
 in_pin:none
 out_pin:none
 
@@ -46,17 +15,21 @@ out_pin:none
 held_note = -1;
 held_chan = -1;
 
+last_in_note  = -1;
+last_in_vel   = -1;
+last_in_chan  = -1;
+last_rel_note = -1;
+last_rel_chan  = -1;
+
+// Note name helpers: store string offsets in memory
+// We'll use memory slots 0..11 for note name chars (2 chars each = 24 slots)
+// Actually we'll just compute note names in gfx via #strings
+
 @slider
-// Channel mapping:
-// slider1 = 0  -> omni (chan = -1, so all channels match)
-// slider1 = 1–16 -> MIDI channels 0–15
 s1   = slider1|0;
 chan = s1 ? (s1 - 1) : -1;
-
 low  = slider2|0;
 high = slider3|0;
-
-// If user sets Low > High, swap them
 low > high ? (
   tmp  = low;
   low  = high;
@@ -66,36 +39,126 @@ low > high ? (
 @block
 while (
   midirecv(ts, msg, msg23) ? (
-    status = msg & $xf0;          // 0x80 = Note Off, 0x90 = Note On
-    ch     = msg & $x0f;          // MIDI channel 0–15
-    note   = msg23 & $xff;        // note number
-    vel    = (msg23/256) & $xff;  // velocity
+    status = msg & $xf0;
+    ch     = msg & $x0f;
+    note   = msg23 & $xff;
+    vel    = (msg23/256) & $xff;
 
     is_note  = (status == $x80) || (status == $x90);
     in_chan  = (chan < 0) || (ch == chan);
     in_range = (note >= low) && (note <= high);
 
     is_note && in_chan && in_range ? (
-      // Hold logic only for Note On with vel > 0
       status == $x90 && vel ? (
-        // Turn off previously held note (if any)
+        // Log incoming note
+        last_in_note = note;
+        last_in_vel  = vel;
+        last_in_chan  = ch + 1;
+
+        // Release previously held note
         held_note >= 0 ? (
+          last_rel_note = held_note;
+          last_rel_chan  = held_chan + 1;
           midisend(ts, $x80 + held_chan, held_note);
         );
 
-        // Store new held note
         held_note = note;
-        held_chan = ch;
-
-        // Send Note On for new note
+        held_chan  = ch;
         midisend(ts, $x90 + ch, note | (vel << 8));
       );
-      // Note Off and Note On with vel=0 in the active range are ignored
     ) : (
-      // Pass everything else unchanged
       midisend(ts, msg, msg23);
     );
-
     1;
   );
 );
+
+@gfx 400 220
+// Colors and layout
+gfx_clear = 0x1a1a2e;   // dark navy background
+
+// Helper: draw a filled rounded rect (simple box here)
+function draw_box(x, y, w, h, r, g, b) (
+  gfx_r = r; gfx_g = g; gfx_b = b; gfx_a = 1;
+  gfx_rect(x, y, w, h);
+);
+
+// Helper: note number -> note name string
+// Returns name in gfx_str (we write directly)
+function note_name(n) (
+  n < 0 ? (
+    gfx_drawstr("---");
+  ) : (
+    oct = (n / 12) | 0;
+    nn  = n % 12;
+    nn == 0  ? gfx_drawstr("C")  :
+    nn == 1  ? gfx_drawstr("C#") :
+    nn == 2  ? gfx_drawstr("D")  :
+    nn == 3  ? gfx_drawstr("D#") :
+    nn == 4  ? gfx_drawstr("E")  :
+    nn == 5  ? gfx_drawstr("F")  :
+    nn == 6  ? gfx_drawstr("F#") :
+    nn == 7  ? gfx_drawstr("G")  :
+    nn == 8  ? gfx_drawstr("G#") :
+    nn == 9  ? gfx_drawstr("A")  :
+    nn == 10 ? gfx_drawstr("A#") :
+               gfx_drawstr("B");
+    gfx_drawnumber(oct - 1, 0);
+  );
+);
+
+gfx_setfont(1, "Arial", 15, 'b');
+
+// --- Title bar ---
+draw_box(0, 0, gfx_w, 28, 0.2, 0.4, 0.8);
+gfx_r=1; gfx_g=1; gfx_b=1; gfx_a=1;
+gfx_x=10; gfx_y=7;
+gfx_drawstr("MIDI Hold Notes Range  |  Monitor");
+
+// --- Zone info ---
+gfx_setfont(1, "Arial", 13, 0);
+draw_box(0, 30, gfx_w, 24, 0.12, 0.12, 0.22);
+gfx_r=0.6; gfx_g=0.8; gfx_b=1; gfx_a=1;
+gfx_x=10; gfx_y=37;
+gfx_drawstr("Zone: ");
+note_name(low);
+gfx_drawstr(" - ");
+note_name(high);
+gfx_drawstr("   Ch: ");
+chan < 0 ? gfx_drawstr("Omni") : gfx_drawnumber(chan+1, 0);
+
+// --- Section: Last received ---
+draw_box(10, 66, gfx_w-20, 44, 0.1, 0.25, 0.15);
+gfx_r=0.4; gfx_g=1; gfx_b=0.4; gfx_a=1;
+gfx_x=18; gfx_y=72;
+gfx_drawstr("IN  ");
+gfx_setfont(1, "Arial", 20, 'b');
+note_name(last_in_note);
+gfx_setfont(1, "Arial", 13, 0);
+gfx_drawstr("  vel:");
+last_in_note >= 0 ? gfx_drawnumber(last_in_vel, 0) : gfx_drawstr("--");
+gfx_drawstr("  ch:");
+last_in_note >= 0 ? gfx_drawnumber(last_in_chan, 0) : gfx_drawstr("--");
+
+// --- Section: Currently held ---
+draw_box(10, 120, gfx_w-20, 44, 0.25, 0.15, 0.05);
+gfx_r=1; gfx_g=0.75; gfx_b=0.1; gfx_a=1;
+gfx_x=18; gfx_y=126;
+gfx_drawstr("HELD");
+gfx_setfont(1, "Arial", 20, 'b');
+gfx_x=18; gfx_y=138;
+note_name(held_note);
+gfx_setfont(1, "Arial", 13, 0);
+gfx_drawstr("  ch:");
+held_note >= 0 ? gfx_drawnumber(held_chan+1, 0) : gfx_drawstr("--");
+
+// --- Section: Last released ---
+draw_box(10, 174, gfx_w-20, 44, 0.25, 0.08, 0.08);
+gfx_r=1; gfx_g=0.35; gfx_b=0.35; gfx_a=1;
+gfx_x=18; gfx_y=180;
+gfx_drawstr("REL ");
+gfx_setfont(1, "Arial", 20, 'b');
+note_name(last_rel_note);
+gfx_setfont(1, "Arial", 13, 0);
+gfx_drawstr("  ch:");
+last_rel_note >= 0 ? gfx_drawnumber(last_rel_chan, 0) : gfx_drawstr("--");
