@@ -1,18 +1,11 @@
-desc:Note State + Grid (16 slots) — toggle on NOTE ON>0, offset & channel selectable — NO MIDI OUT
+desc:Akai APC pad color controler
 
-// -------------------------
-// Sliders (state+grid only)
-// -------------------------
 slider1:0<0,16,1{Omni,Channel 1,Channel 2,Channel 3,Channel 4,Channel 5,Channel 6,Channel 7,Channel 8,Channel 9,Channel 10,Channel 11,Channel 12,Channel 13,Channel 14,Channel 15,Channel 16}>MIDI Channel (for input gating)
 slider2:1<1,3,1{Dark Gray,Gray,Black}>Color Scheme
 slider3:0<0,112,1>Slot base note (offset)
 slider4:0<0,127,1>Pad Color Index
 
-// -------------------------
-// @init — state & minimal logs
-// -------------------------
 @init
-// color palette (0..127 -> 0xRRGGBB)
 color[0]=0x000000;  color[1]=0x1E1E1E;  color[2]=0x7F7F7F;  color[3]=0xFFFFFF;  color[4]=0xFF4C4C;
 color[5]=0xFF0000;  color[6]=0x590000;  color[7]=0x190000;  color[8]=0xFFBD6C;  color[9]=0xFF5400;
 color[10]=0x591D00; color[11]=0x271B00; color[12]=0xFFFF4C; color[13]=0xFFFF00; color[14]=0x595900;
@@ -40,70 +33,49 @@ color[115]=0x9A99FF; color[116]=0x8E66FF; color[117]=0x404040; color[118]=0x7575
 color[120]=0xA00000; color[121]=0x350000; color[122]=0x1AD000; color[123]=0x074200; color[124]=0xB9B000;
 color[125]=0x3F3100; color[126]=0xB35F00; color[127]=0x4B1502;
 
-SLOTS = 16;                       // 4x4 grid
+SLOTS = 16;
 STATE_BASE = 0; STATE_SIZE = SLOTS;
-state = STATE_BASE;               // 16 booleans: 0/1
+state = STATE_BASE;
 sysex = 16;
 
-// minimal logs for UI
 last_in_status=-1; last_in_ch=-1; last_in_d1=-1; last_in_d2=-1;
 last_toggle_slot=-1; last_toggle_newstate=-1;
 last_reset_cc=-1; last_reset_ch=-1;
 
-// clear states
-i = 0;
-loop(STATE_SIZE,
-  state[i] = 0;
-  i += 1;
-);
+i=0; loop(STATE_SIZE, state[i]=0; i+=1;);
 
-// Helper: SysEx OFF for pad id 0..63
 function send_pad_off(off, pid) (
-  sysex[0]  = 0xF0; sysex[1]  = 0x47; sysex[2]  = 0x7F; sysex[3]  = 0x4F; sysex[4]  = 0x24;
-  sysex[5]  = 0x00; sysex[6]  = 0x08;
-  sysex[7]  = pid & 0x7F;      sysex[8]  = pid & 0x7F;
-  sysex[9]  = 0;   sysex[10] = 0;   sysex[11] = 0;   sysex[12] = 0;   sysex[13] = 0;   sysex[14] = 0;
-  sysex[15] = 0xF7;
+  sysex[0]=0xF0; sysex[1]=0x47; sysex[2]=0x7F; sysex[3]=0x4F; sysex[4]=0x24;
+  sysex[5]=0x00; sysex[6]=0x08;
+  sysex[7]=pid&0x7F; sysex[8]=pid&0x7F;
+  sysex[9]=0; sysex[10]=0; sysex[11]=0; sysex[12]=0; sysex[13]=0; sysex[14]=0;
+  sysex[15]=0xF7;
   midisend_buf(off, sysex, 16);
 );
 
-// Prebuilt SysEx header
-sysex[0] = 0xF0;
-sysex[1] = 0x47;
-sysex[2] = 0x7F;
-sysex[3] = 0x4F;
-sysex[4] = 0x24;
-sysex[5] = 0x00;
-sysex[6] = 0x08;
+sysex[0]=0xF0; sysex[1]=0x47; sysex[2]=0x7F; sysex[3]=0x4F; sysex[4]=0x24;
+sysex[5]=0x00; sysex[6]=0x08;
 
-// -------------------------
-// @slider — keep settings in sync
-// -------------------------
 @slider
-channel     = slider1 - 1;        // -1..15
-color_mode  = slider2 | 0;
-slot_offset = slider3 | 0;        // 0..112
-color_idx   = slider4 | 0;
+channel     = slider1 - 1;
+color_mode  = slider2|0;
+slot_offset = slider3|0;
+color_idx   = slider4|0;
 
-// -------------------------
-// @block — update ONLY internal state (NO MIDI OUT / NO THRU)
-// -------------------------
 @block
 while (
   midirecv(offset, msg1, msg23) ?
   (
     status = msg1 & 0xF0;
     ch     = msg1 & 0x0F;
-    d1     =  msg23       & 0x7F; // note/cc
-    d2     = (msg23 >> 8) & 0x7F; // vel/value
+    d1     =  msg23       & 0x7F;
+    d2     = (msg23 >> 8) & 0x7F;
 
-    // minimal IN log for UI
-    last_in_status = status; last_in_ch = ch; last_in_d1 = d1; last_in_d2 = d2;
+    last_in_status=status; last_in_ch=ch; last_in_d1=d1; last_in_d2=d2;
 
     reacts = (channel < 0) || (ch == channel);
 
-    // NOTE ON with vel > 0 => toggle slot (state only)  + RGB SysEx
-    (status == 0x90) && (d2 > 0) && reacts ? (
+    (status==0x90) && (d2>0) && reacts ? (
       slot = d1 - slot_offset;
       (slot >= 0 && slot < SLOTS) ? (
         newstate = state[slot] ? 0 : 1;
@@ -111,169 +83,303 @@ while (
         last_toggle_slot = slot;
         last_toggle_newstate = newstate;
 
-        // map incoming pad id 0..127 -> 0..63 for RGB SysEx
         pad_in  = d1 & 0x7F;
-        pad_rgb = pad_in & 0x3F; // (>=64) wrap to 0..63
+        pad_rgb = pad_in & 0x3F;
 
-        (newstate == 1) ? (
-          rgb   = color[color_idx];
-          R     = (rgb & 0xFF0000) >> 16;
-          G     = (rgb & 0x00FF00) >> 8;
-          B     = (rgb & 0x0000FF);
-          sysexR = R * 127 / 255;
-          sysexG = G * 127 / 255;
-          sysexB = B * 127 / 255;
-
-          sysex[7] = pad_rgb;
-          sysex[8] = pad_rgb;
-          sysex[9]  = 0;         sysex[10] = sysexR;
-          sysex[11] = 0;         sysex[12] = sysexG;
-          sysex[13] = 0;         sysex[14] = sysexB;
-          sysex[15] = 0xF7;
-
+        newstate == 1 ? (
+          rgb    = color[color_idx];
+          R      = (rgb & 0xFF0000) >> 16;
+          G      = (rgb & 0x00FF00) >> 8;
+          B      = (rgb & 0x0000FF);
+          sysex[7]=pad_rgb; sysex[8]=pad_rgb;
+          sysex[9]=0;  sysex[10]=R*127/255;
+          sysex[11]=0; sysex[12]=G*127/255;
+          sysex[13]=0; sysex[14]=B*127/255;
+          sysex[15]=0xF7;
           midisend_buf(offset, sysex, 16);
         ) : (
-          sysex[7] = pad_rgb;
-          sysex[8] = pad_rgb;
-          sysex[9]  = 0; sysex[10] = 0;
-          sysex[11] = 0; sysex[12] = 0;
-          sysex[13] = 0; sysex[14] = 0;
-          sysex[15] = 0xF7;
-
+          sysex[7]=pad_rgb; sysex[8]=pad_rgb;
+          sysex[9]=0; sysex[10]=0; sysex[11]=0; sysex[12]=0;
+          sysex[13]=0; sysex[14]=0; sysex[15]=0xF7;
           midisend_buf(offset, sysex, 16);
         );
       );
     );
 
-    // All Notes Off(123) / All Sound Off(120) => clear state (no MIDI out)
-    (status == 0xB0) ? (
+    (status==0xB0) ? (
       cc = d1;
-      (cc == 123 || cc == 120) ? (
-        i = 0; loop(SLOTS, state[i] = 0; i += 1;);
-        last_reset_cc = cc; last_reset_ch = ch;
-        pid = 0; loop(64, send_pad_off(offset, pid); pid += 1;);
+      (cc==123 || cc==120) ? (
+        i=0; loop(SLOTS, state[i]=0; i+=1;);
+        last_reset_cc=cc; last_reset_ch=ch;
+        pid=0; loop(64, send_pad_off(offset,pid); pid+=1;);
       );
     );
-
-    // swallow everything (no pass-through / no out)
     1;
   ) : 0
 );
 
-// -------------------------
-// @gfx — UI + 4x4 grid (state visualisation only)
-// -------------------------
-@gfx
-gfx_clear = (color_mode == 1) ? 0x202020 : (color_mode == 2) ? 0x303030 : 0x000000;
-gfx_a = 1;
-margin = 10; pad_between = 4; bottompad = margin; cols = 4; rows = 4;
-gfx_setfont(1, "", 14);
+@gfx 480 540
+// ── BACKGROUND ───────────────────────────────────────────
+bg_r = color_mode==1 ? 0.10 : color_mode==2 ? 0.14 : 0.04;
+bg_g = color_mode==1 ? 0.10 : color_mode==2 ? 0.14 : 0.04;
+bg_b = color_mode==1 ? 0.12 : color_mode==2 ? 0.16 : 0.05;
+gfx_r=bg_r; gfx_g=bg_g; gfx_b=bg_b; gfx_a=1;
+gfx_rect(0, 0, gfx_w, gfx_h);
 
-// header
-#ch_str = "";
-(channel < 0) ? strcpy(#ch_str, "Omni") : sprintf(#ch_str, "Ch %d", channel + 1);
-sprintf(#hdr, "State+Grid — %s — Slots:16 — Offset:%d..%d", #ch_str, slot_offset, slot_offset + 15);
-gfx_measurestr(#hdr, w, h);
-gfx_r = gfx_g = gfx_b = 1; gfx_x = margin; gfx_y = margin; gfx_drawstr(#hdr);
-
-// IN log
-(last_in_status >= 0) ?
-(
-  #it = "";
-  (last_in_status == 0x80) ? strcpy(#it, "IN: NoteOff")
-  : (last_in_status == 0x90) ? strcpy(#it, "IN: NoteOn")
-  : (last_in_status == 0xB0) ? strcpy(#it, "IN: CC")
-  : (last_in_status == 0xE0) ? strcpy(#it, "IN: Pitch")
-  : sprintf(#it, "IN: 0x%02X", last_in_status);
-  sprintf(#inln, "%s  Ch %d  d1=%3d  d2=%3d", #it, last_in_ch + 1, last_in_d1, last_in_d2);
-)
-:
-(
-  strcpy(#inln, "IN: —");
+function draw_box(x,y,w,h,r,g,b) (
+  gfx_r=r; gfx_g=g; gfx_b=b; gfx_a=1;
+  gfx_rect(x,y,w,h);
 );
-gfx_measurestr(#inln, iw, ih);
-gfx_x = margin; gfx_y = margin + h + pad_between; gfx_drawstr(#inln);
 
-// last toggle / last reset
-(last_toggle_slot >= 0) ?
-(
-  sprintf(#tgl, "Last toggle: slot %d  -> %s  (note %d)", last_toggle_slot, (last_toggle_newstate ? "ON" : "OFF"), slot_offset + last_toggle_slot);
-)
-:
-(
-  strcpy(#tgl, "Last toggle: —");
+function draw_note(n) (
+  n < 0 ? (
+    gfx_drawstr("---");
+  ) : (
+    oct = (n/12)|0;
+    nn  = n%12;
+    nn==0  ? gfx_drawstr("C")  :
+    nn==1  ? gfx_drawstr("C#") :
+    nn==2  ? gfx_drawstr("D")  :
+    nn==3  ? gfx_drawstr("D#") :
+    nn==4  ? gfx_drawstr("E")  :
+    nn==5  ? gfx_drawstr("F")  :
+    nn==6  ? gfx_drawstr("F#") :
+    nn==7  ? gfx_drawstr("G")  :
+    nn==8  ? gfx_drawstr("G#") :
+    nn==9  ? gfx_drawstr("A")  :
+    nn==10 ? gfx_drawstr("A#") :
+             gfx_drawstr("B");
+    gfx_drawnumber(oct-1, 0);
+  );
 );
-gfx_measurestr(#tgl, tw, th);
-gfx_x = margin; gfx_y = margin + h + pad_between + ih + pad_between; gfx_drawstr(#tgl);
 
-(last_reset_cc >= 0) ?
-(
-  sprintf(#rst, "Last reset: CC %d  on Ch %d", last_reset_cc, last_reset_ch + 1);
-)
-:
-(
-  strcpy(#rst, "Last reset: —");
+// cache current color components
+cur_rgb = color[color_idx];
+cur_r   = ((cur_rgb >> 16) & 0xFF) / 255.0;
+cur_g   = ((cur_rgb >>  8) & 0xFF) / 255.0;
+cur_b   = ( cur_rgb        & 0xFF) / 255.0;
+
+// ── TITLE ────────────────────────────────────────────────
+draw_box(0, 0, gfx_w, 28, 0.08, 0.05, 0.18);
+gfx_setfont(1,"Arial",14,'b');
+gfx_r=1; gfx_g=1; gfx_b=1; gfx_a=1;
+gfx_x=10; gfx_y=6;
+gfx_drawstr("AKAI APC — Pad Color Controller");
+
+// ── SETTINGS BADGES ──────────────────────────────────────
+draw_box(0, 30, gfx_w, 26, 0.06, 0.04, 0.14);
+
+// channel badge
+channel < 0 ? (
+  draw_box(8, 34, 58, 18, 0.15, 0.1, 0.35);
+  gfx_r=0.7; gfx_g=0.55; gfx_b=1;
+) : (
+  draw_box(8, 34, 58, 18, 0.12, 0.08, 0.3);
+  gfx_r=0.7; gfx_g=0.55; gfx_b=1;
 );
-gfx_measurestr(#rst, rw, rh);
-gfx_x = margin; gfx_y = margin + h + pad_between + ih + pad_between + th + pad_between; gfx_drawstr(#rst);
+gfx_a=1; gfx_setfont(1,"Arial",10,0);
+gfx_x=13; gfx_y=37;
+channel < 0 ? gfx_drawstr("IN: Omni") : (gfx_drawstr("IN: Ch "); gfx_drawnumber(channel+1,0););
 
-// ==== Color preview square to the right of logs ====
-col = color[color_idx];
-pr  = ((col >> 16) & 255) / 255.0;
-pg  = ((col >> 8)  & 255) / 255.0;
-pb  = ( col        & 255) / 255.0;
-box = 48;
-bx  = gfx_w - margin - box;
-by  = margin + h + pad_between; // aligned with IN log row
-gfx_set(pr, pg, pb); gfx_rect(bx, by, box, box); gfx_set(1,1,1);
+// note range badge
+draw_box(74, 34, 100, 18, 0.1, 0.1, 0.25);
+gfx_r=0.6; gfx_g=0.7; gfx_b=1; gfx_a=1;
+gfx_x=79; gfx_y=37;
+gfx_drawstr("Notes: ");
+draw_note(slot_offset);
+gfx_drawstr("–");
+draw_note(slot_offset+15);
 
-// GRID 4x4 — left-to-right, top-to-bottom
-top     = margin + h + pad_between + ih + pad_between + th + pad_between + rh + pad_between;
-avail_w = max(1, gfx_w - 2 * margin);
-avail_h = max(1, gfx_h - top - bottompad - 20 - pad_between);
-cell_w  = floor(avail_w / cols);
-cell_h  = floor(avail_h / rows);
-cell_h < 18 ? cell_h = 18;
-grid_w  = cell_w * cols;
-grid_h  = cell_h * rows;
-grid_x0 = margin + floor((avail_w - grid_w) * 0.5);
-grid_y0 = top;
+// color index badge — filled with actual color
+draw_box(182, 34, 90, 18, cur_r*0.4, cur_g*0.4, cur_b*0.4);
+gfx_r=cur_r; gfx_g=cur_g; gfx_b=cur_b; gfx_a=1;
+gfx_x=187; gfx_y=37;
+gfx_drawstr("Color #");
+gfx_drawnumber(color_idx,0);
 
-i = 0;
+// big color swatch (right side)
+sw=36; sx=gfx_w-8-sw; sy=30;
+draw_box(sx-2, sy+2, sw+4, sw+4, 0.2,0.2,0.2);  // shadow
+gfx_r=cur_r; gfx_g=cur_g; gfx_b=cur_b; gfx_a=1;
+gfx_rect(sx, sy+4, sw, sw);
+// swatch label
+gfx_setfont(1,"Arial",8,0);
+gfx_r=0.5; gfx_g=0.5; gfx_b=0.6;
+gfx_x=sx; gfx_y=sy+sw+6;
+
+// ── LOG PANELS ───────────────────────────────────────────
+py  = 64;
+pw  = (gfx_w-28)/2;
+
+// LAST IN
+last_in_status >= 0 ? (
+  draw_box(8, py, pw, 62, 0.05, 0.15, 0.28);
+  gfx_r=0.4; gfx_g=0.8; gfx_b=1;
+) : (
+  draw_box(8, py, pw, 62, 0.07, 0.07, 0.1);
+  gfx_r=0.3; gfx_g=0.4; gfx_b=0.5;
+);
+gfx_a=1; gfx_setfont(1,"Arial",10,'b');
+gfx_x=14; gfx_y=py+5; gfx_drawstr("LAST IN");
+gfx_setfont(1,"Arial",10,0);
+last_in_status >= 0 ? (
+  gfx_x=14; gfx_y=py+20;
+  last_in_status==0x90 ? gfx_drawstr("Note On") :
+  last_in_status==0x80 ? gfx_drawstr("Note Off") :
+  last_in_status==0xB0 ? gfx_drawstr("CC") : gfx_drawstr("other");
+  gfx_x=14; gfx_y=py+34;
+  gfx_drawstr("note: "); gfx_drawnumber(last_in_d1,0);
+  gfx_drawstr("  vel: "); gfx_drawnumber(last_in_d2,0);
+  gfx_x=14; gfx_y=py+48;
+  gfx_drawstr("ch: "); gfx_drawnumber(last_in_ch+1,0);
+) : (gfx_x=14; gfx_y=py+20; gfx_drawstr("—"););
+
+// LAST TOGGLE
+px1 = 8+pw+6;
+last_toggle_slot >= 0 ? (
+  last_toggle_newstate ? (
+    draw_box(px1, py, pw, 62, 0.15, 0.08, 0.3);
+    gfx_r=cur_r; gfx_g=cur_g; gfx_b=cur_b;
+  ) : (
+    draw_box(px1, py, pw, 62, 0.15, 0.08, 0.08);
+    gfx_r=0.8; gfx_g=0.35; gfx_b=0.35;
+  );
+) : (
+  draw_box(px1, py, pw, 62, 0.07, 0.07, 0.1);
+  gfx_r=0.35; gfx_g=0.35; gfx_b=0.4;
+);
+gfx_a=1; gfx_setfont(1,"Arial",10,'b');
+gfx_x=px1+6; gfx_y=py+5; gfx_drawstr("LAST TOGGLE");
+gfx_setfont(1,"Arial",10,0);
+last_toggle_slot >= 0 ? (
+  gfx_x=px1+6; gfx_y=py+20;
+  gfx_drawstr("slot: "); gfx_drawnumber(last_toggle_slot,0);
+  gfx_x=px1+6; gfx_y=py+34;
+  gfx_drawstr("note: "); draw_note(slot_offset+last_toggle_slot);
+  gfx_x=px1+6; gfx_y=py+48;
+  last_toggle_newstate ? (
+    gfx_r=cur_r; gfx_g=cur_g; gfx_b=cur_b;
+    gfx_drawstr("→ ON  [color #");
+    gfx_drawnumber(color_idx,0);
+    gfx_drawstr("]");
+  ) : (
+    gfx_r=0.8; gfx_g=0.35; gfx_b=0.35;
+    gfx_drawstr("→ OFF [LED dark]");
+  );
+) : (gfx_x=px1+6; gfx_y=py+20; gfx_drawstr("—"););
+
+// RESET BANNER
+last_reset_cc >= 0 ? (
+  draw_box(8, py+68, gfx_w-16, 18, 0.35, 0.08, 0.08);
+  gfx_setfont(1,"Arial",10,'b');
+  gfx_r=1; gfx_g=0.35; gfx_b=0.35; gfx_a=1;
+  gfx_x=14; gfx_y=py+71;
+  gfx_drawstr("RESET  CC");
+  gfx_drawnumber(last_reset_cc,0);
+  gfx_drawstr("  ch");
+  gfx_drawnumber(last_reset_ch+1,0);
+  gfx_drawstr("  — all pads cleared");
+);
+
+// ── COLOR PALETTE STRIP (all 128 colors) ─────────────────
+strip_y  = py + 92;
+strip_h  = 16;
+strip_w  = gfx_w - 16;
+swatch_w = strip_w / 128.0;
+
+gfx_setfont(1,"Arial",9,0);
+gfx_r=0.4; gfx_g=0.4; gfx_b=0.5; gfx_a=1;
+gfx_x=8; gfx_y=strip_y-13;
+gfx_drawstr("Color palette (0–127):");
+
+ci=0;
+loop(128,
+  cx2 = 8 + ci*swatch_w;
+  cr2 = ((color[ci] >> 16) & 0xFF) / 255.0;
+  cg2 = ((color[ci] >>  8) & 0xFF) / 255.0;
+  cb2 = ( color[ci]        & 0xFF) / 255.0;
+  gfx_r=cr2; gfx_g=cg2; gfx_b=cb2; gfx_a=1;
+  gfx_rect(cx2|0, strip_y, (swatch_w+1)|0, strip_h);
+  ci+=1;
+);
+
+// cursor on palette
+cur_cx = (8 + color_idx*swatch_w)|0;
+gfx_r=1; gfx_g=1; gfx_b=1; gfx_a=1;
+gfx_line(cur_cx, strip_y-2, cur_cx, strip_y+strip_h+2);
+gfx_line(cur_cx-1, strip_y-2, cur_cx-1, strip_y+strip_h+2);
+
+// ── 4×4 PAD GRID ─────────────────────────────────────────
+grid_top = strip_y + strip_h + 14;
+margin   = 8;
+gap      = 6;
+cols     = 4; rows = 4;
+cell_w   = (gfx_w - 2*margin - gap*(cols-1)) / cols;
+cell_h   = (gfx_h - grid_top - margin - gap*(rows-1)) / rows;
+cell_h < 60 ? cell_h = 60;
+
+i=0;
 loop(SLOTS,
-  row = floor(i / cols);
-  col = i % cols;
+  row2 = (i/cols)|0;
+  col2 = i%cols;
+  gx = margin + col2*(cell_w+gap);
+  gy = grid_top + row2*(cell_h+gap);
 
-  gx = grid_x0 + col * cell_w;   // left to right
-  gy = grid_y0 + row * cell_h;   // top to bottom
+  on       = state[i] ? 1 : 0;
+  real_note = slot_offset+i;
+  real_note < 0 ? real_note=0 : real_note > 127 ? real_note=127;
+  is_last  = (i == last_toggle_slot);
 
-  on = state[i] ? 1 : 0;
-  real_note = slot_offset + i;
-  real_note < 0 ? real_note = 0 : real_note > 127 ? real_note = 127;
-
-  // cell background
-  gfx_r = on ? pr * 0.25 : 0.07;
-  gfx_g = on ? pg * 0.25 : 0.07;
-  gfx_b = on ? pb * 0.25 : 0.07;
-  gfx_rect(gx, gy, cell_w - 1, cell_h - 1);
+  // background
+  on ? (
+    // lit with actual palette color (dimmed)
+    gfx_r=cur_r*0.35; gfx_g=cur_g*0.35; gfx_b=cur_b*0.35;
+    gfx_rect(gx, gy, cell_w, cell_h);
+    // inner bright center glow
+    iw2=cell_w-16; ih2=cell_h-16;
+    gfx_r=cur_r*0.7; gfx_g=cur_g*0.7; gfx_b=cur_b*0.7;
+    gfx_rect(gx+8, gy+8, iw2, ih2);
+  ) : (
+    draw_box(gx, gy, cell_w, cell_h, 0.07, 0.06, 0.09);
+  );
 
   // border
-  gfx_r = gfx_g = gfx_b = 0.6;
-  gfx_line(gx, gy, gx + cell_w - 1, gy);
-  gfx_line(gx, gy, gx, gy + cell_h - 1);
-  gfx_line(gx + cell_w - 1, gy, gx + cell_w - 1, gy + cell_h - 1);
-  gfx_line(gx, gy + cell_h - 1, gx + cell_w - 1, gy + cell_h - 1);
+  on ? (gfx_r=cur_r; gfx_g=cur_g; gfx_b=cur_b;) :
+  is_last ? (gfx_r=0.5; gfx_g=0.5; gfx_b=0.6;) :
+            (gfx_r=0.2; gfx_g=0.2; gfx_b=0.28;);
+  gfx_a=1;
+  gfx_line(gx,        gy,        gx+cell_w-1, gy);
+  gfx_line(gx,        gy,        gx,          gy+cell_h-1);
+  gfx_line(gx+cell_w-1, gy,     gx+cell_w-1, gy+cell_h-1);
+  gfx_line(gx,        gy+cell_h-1, gx+cell_w-1, gy+cell_h-1);
 
-  // label
-  gfx_r = on ? 0.2 : 0.8;
-  gfx_g = on ? 1.0 : 0.8;
-  gfx_b = on ? 0.2 : 0.8;
-  gfx_x = gx + 4;
-  gfx_y = gy + floor((cell_h - 12) * 0.5);
-  sprintf(#lab, "N %03d", real_note);
-  gfx_drawstr(#lab);
+  // slot index top-left
+  gfx_setfont(1,"Arial",9,0);
+  gfx_r=0.35; gfx_g=0.35; gfx_b=0.45; gfx_a=1;
+  gfx_x=gx+4; gfx_y=gy+4;
+  gfx_drawnumber(i,0);
 
-  i += 1;
+  // ON/OFF top-right
+  gfx_setfont(1,"Arial",9,'b');
+  on ? (gfx_r=cur_r; gfx_g=cur_g; gfx_b=cur_b; gfx_x=gx+cell_w-20; gfx_y=gy+4; gfx_drawstr("ON");) :
+       (gfx_r=0.3; gfx_g=0.3; gfx_b=0.4; gfx_x=gx+cell_w-24; gfx_y=gy+4; gfx_drawstr("OFF"););
+
+  // note name centre
+  gfx_setfont(1,"Arial",16,'b');
+  on ? (gfx_r=cur_r; gfx_g=cur_g; gfx_b=cur_b;) : (gfx_r=0.28; gfx_g=0.28; gfx_b=0.38;);
+  gfx_a=1;
+  gfx_x=gx+6; gfx_y=gy+18;
+  draw_note(real_note);
+
+  // MIDI note number bottom
+  gfx_setfont(1,"Arial",9,0);
+  on ? (gfx_r=cur_r*0.8; gfx_g=cur_g*0.8; gfx_b=cur_b*0.8;) : (gfx_r=0.25; gfx_g=0.25; gfx_b=0.35;);
+  gfx_a=1;
+  gfx_x=gx+4; gfx_y=gy+cell_h-14;
+  gfx_drawstr("N ");
+  gfx_drawnumber(real_note,0);
+
+  i+=1;
 );
 
-gfx_dirty = 1;
+gfx_dirty=1;
