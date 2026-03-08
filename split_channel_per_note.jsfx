@@ -1,9 +1,12 @@
 desc: MIDI Dual Region Filter
 author: tomaszpio
-version: 2.0.0
+version: 2.3.0
 about:
   Two independent note regions, each with its own input channel and note range.
   Accepted notes are routed to a single output channel.
+  Notes in range but on wrong channel are blocked (Note On and Note Off).
+  Note Off for tracked note on wrong channel is blocked - note stays active.
+  Notes outside both regions are blocked entirely.
   Overlap behaviour is configurable via slider.
 
 slider1:1<1,16,1>Region A — Input channel
@@ -20,27 +23,22 @@ in_pin:none
 out_pin:none
 
 @init
-// per-note tracking: which region sent the Note On
-// so Note Off goes to the right place
-// note_region[note] = 0=none, 1=A, 2=B, 3=both
 note_region = 400;
 memset(note_region, 0, 128);
 
-// activity trackers
 a_last_note = -1; a_last_vel = 0; a_active = 0; a_blocked = 0;
 b_last_note = -1; b_last_vel = 0; b_active = 0; b_blocked = 0;
 out_last_note = -1; out_last_vel = 0; out_active = 0;
 
-// MIDI log
 LOG_SIZE   = 10;
-LOG_FIELDS = 5;   // dir, status, note, vel, interp
+LOG_FIELDS = 5;
 LOG_BASE   = 600;
 log_head   = 0;
 log_count  = 0;
 
 // interp codes:
-// 0=A accepted, 1=B accepted, 2=A blocked, 3=B blocked,
-// 4=passthru, 5=NoteOff out, 6=both sent, 7=overlap blocked
+// 0=A accepted, 1=B accepted, 2=wrong ch blocked A, 3=wrong ch blocked B
+// 4=passthru, 5=NoteOff, 6=both/overlap, 7=outside all regions
 
 function log_push(ldir, lstatus, lnote, lvel, linterp) local(base) (
   base = LOG_BASE + log_head * LOG_FIELDS;
@@ -64,7 +62,6 @@ out_ch   = (slider7|0) - 1;
 ovl_mode = slider8|0;
 other    = slider9|0;
 
-// auto-swap if low > high
 a_low > a_high ? (tmp=a_low; a_low=a_high; a_high=tmp;);
 b_low > b_high ? (tmp=b_low; b_low=b_high; b_high=tmp;);
 
@@ -78,18 +75,20 @@ while (midirecv(offset, msg1, msg23)) (
   is_note_on  = (status == 0x90) && vel > 0;
   is_note_off = (status == 0x80) || ((status == 0x90) && vel == 0);
 
-  // check region membership
-  in_A = (in_ch == a_in_ch) && (note >= a_low) && (note <= a_high);
-  in_B = (in_ch == b_in_ch) && (note >= b_low) && (note <= b_high);
+  range_A = (note >= a_low) && (note <= a_high);
+  range_B = (note >= b_low) && (note <= b_high);
+
+  in_A = (in_ch == a_in_ch) && range_A;
+  in_B = (in_ch == b_in_ch) && range_B;
+
+  blocked_A = range_A && (in_ch != a_in_ch) && !in_B;
+  blocked_B = range_B && (in_ch != b_in_ch) && !in_A;
 
   is_note_on ? (
-    // log raw IN
-    log_push(0, status | in_ch, note, vel, in_A && in_B ? 6 : in_A ? 0 : in_B ? 1 : 4);
 
     in_A && in_B ? (
-      // overlap — decide by mode
+      log_push(0, status | in_ch, note, vel, 6);
       ovl_mode == 0 ? (
-        // send to both
         midisend(offset, 0x90 | out_ch, note | (vel << 8));
         midisend(offset, 0x90 | out_ch, note | (vel << 8));
         note_region[note] = 3;
@@ -98,14 +97,12 @@ while (midirecv(offset, msg1, msg23)) (
         b_last_note=note; b_last_vel=vel; b_active=1;
         out_last_note=note; out_last_vel=vel; out_active=1;
       ) : ovl_mode == 1 ? (
-        // A priority
         midisend(offset, 0x90 | out_ch, note | (vel << 8));
         note_region[note] = 1;
         log_push(1, 0x90 | out_ch, note, vel, 0);
         a_last_note=note; a_last_vel=vel; a_active=1;
         out_last_note=note; out_last_vel=vel; out_active=1;
       ) : (
-        // B priority
         midisend(offset, 0x90 | out_ch, note | (vel << 8));
         note_region[note] = 2;
         log_push(1, 0x90 | out_ch, note, vel, 1);
@@ -113,44 +110,78 @@ while (midirecv(offset, msg1, msg23)) (
         out_last_note=note; out_last_vel=vel; out_active=1;
       );
     ) : in_A ? (
+      log_push(0, status | in_ch, note, vel, 0);
       midisend(offset, 0x90 | out_ch, note | (vel << 8));
       note_region[note] = 1;
       log_push(1, 0x90 | out_ch, note, vel, 0);
       a_last_note=note; a_last_vel=vel; a_active=1;
       out_last_note=note; out_last_vel=vel; out_active=1;
     ) : in_B ? (
+      log_push(0, status | in_ch, note, vel, 1);
       midisend(offset, 0x90 | out_ch, note | (vel << 8));
       note_region[note] = 2;
       log_push(1, 0x90 | out_ch, note, vel, 1);
       b_last_note=note; b_last_vel=vel; b_active=1;
       out_last_note=note; out_last_vel=vel; out_active=1;
+    ) : blocked_A ? (
+      log_push(0, status | in_ch, note, vel, 2);
+      a_blocked += 1;
+    ) : blocked_B ? (
+      log_push(0, status | in_ch, note, vel, 3);
+      b_blocked += 1;
     ) : (
-      // not in any region
-      log_push(0, status | in_ch, note, vel, 4);
-      other == 0 ? (
-        midisend(offset, msg1, msg23);
-        log_push(1, msg1, note, vel, 4);
-      );
+      log_push(0, status | in_ch, note, vel, 7);
     );
 
   ) : is_note_off ? (
-    log_push(0, status | in_ch, note, vel, 5);
 
     note_region[note] > 0 ? (
-      // send Note Off for any region that held this note
-      midisend(offset, 0x80 | out_ch, note);
-      log_push(1, 0x80 | out_ch, note, 0, 5);
-      note_region[note] == 1 ? (a_active = 0; out_active = 0;);
-      note_region[note] == 2 ? (b_active = 0; out_active = 0;);
-      note_region[note] == 3 ? (a_active = 0; b_active = 0; out_active = 0;);
-      note_region[note] = 0;
-    ) : (
-      // note not tracked — passthru or block
-      other == 0 ? (
-        midisend(offset, msg1, msg23);
-        log_push(1, msg1, note, vel, 4);
+      // nota tracked — sprawdzamy kanał
+      note_region[note] == 1 ? (
+        in_ch == a_in_ch ? (
+          midisend(offset, 0x80 | out_ch, note);
+          log_push(0, status | in_ch, note, vel, 5);
+          log_push(1, 0x80 | out_ch, note, 0, 5);
+          a_active = 0; out_active = 0;
+          note_region[note] = 0;
+        ) : (
+          // zły kanał → blokujemy, nuta zostaje aktywna
+          log_push(0, status | in_ch, note, vel, 2);
+          a_blocked += 1;
+        );
+      ) : note_region[note] == 2 ? (
+        in_ch == b_in_ch ? (
+          midisend(offset, 0x80 | out_ch, note);
+          log_push(0, status | in_ch, note, vel, 5);
+          log_push(1, 0x80 | out_ch, note, 0, 5);
+          b_active = 0; out_active = 0;
+          note_region[note] = 0;
+        ) : (
+          log_push(0, status | in_ch, note, vel, 3);
+          b_blocked += 1;
+        );
+      ) : note_region[note] == 3 ? (
+        // overlap — akceptujemy kanał A lub B
+        in_ch == a_in_ch || in_ch == b_in_ch ? (
+          midisend(offset, 0x80 | out_ch, note);
+          log_push(0, status | in_ch, note, vel, 5);
+          log_push(1, 0x80 | out_ch, note, 0, 5);
+          a_active = 0; b_active = 0; out_active = 0;
+          note_region[note] = 0;
+        ) : (
+          log_push(0, status | in_ch, note, vel, 2);
+          a_blocked += 1;
+        );
       );
+    ) : blocked_A ? (
+      // nota nie tracked, zakres A ale zły kanał
+      log_push(0, status | in_ch, note, vel, 2);
+      a_blocked += 1;
+    ) : blocked_B ? (
+      log_push(0, status | in_ch, note, vel, 3);
+      b_blocked += 1;
     );
+    // poza zakresami → cicho ignorujemy
 
   ) : (
     // non-note messages
@@ -162,7 +193,7 @@ while (midirecv(offset, msg1, msg23)) (
   );
 );
 
-@gfx 580 600
+@gfx 580 620
 gfx_clear = 0x0c0c18;
 
 function draw_box(x,y,w,h,r,g,b) (
@@ -195,43 +226,37 @@ draw_box(0,0,gfx_w,26, 0.1,0.22,0.5);
 gfx_setfont(1,"Arial",14,'b');
 gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
 gfx_x=10;gfx_y=5;
-gfx_drawstr("MIDI Dual Region Filter");
+gfx_drawstr("MIDI Dual Region Filter  v2.3");
 
 // ── DUAL RANGE BAR ───────────────────────────────────────
-ky=32; kh=20; kx=10; kw=gfx_w-20;
+ky=32; kh=22; kx=10; kw=gfx_w-20;
 
-// background
-draw_box(kx,ky,kw,kh, 0.1,0.1,0.15);
+draw_box(kx,ky,kw,kh, 0.08,0.08,0.13);
 
-// Region A bar
 ax1=(kx + a_low/127.0*kw)|0;
 ax2=(kx + a_high/127.0*kw)|0;
-draw_box(ax1,ky, ax2-ax1,kh/2, 0.1,0.35,0.6);
+draw_box(ax1,ky, ax2-ax1,kh/2, 0.1,0.35,0.62);
 
-// Region B bar
 bx1=(kx + b_low/127.0*kw)|0;
 bx2=(kx + b_high/127.0*kw)|0;
 draw_box(bx1,ky+kh/2, bx2-bx1,kh/2, 0.5,0.15,0.55);
 
-// overlap highlight
 ol1 = ax1>bx1?ax1:bx1;
 ol2 = ax2<bx2?ax2:bx2;
 ol1 < ol2 ? (
-  gfx_r=1;gfx_g=0.85;gfx_b=0.1;gfx_a=0.5;
+  gfx_r=1;gfx_g=0.85;gfx_b=0.1;gfx_a=0.45;
   gfx_rect(ol1,ky,ol2-ol1,kh);
 );
 
-// A labels
 gfx_setfont(1,"Arial",9,0);
 gfx_r=0.45;gfx_g=0.82;gfx_b=1;gfx_a=1;
-gfx_x=ax1+2;gfx_y=ky+2;
-gfx_drawstr("A:"); draw_note(a_low); gfx_drawstr("–"); draw_note(a_high);
+gfx_x=ax1+3;gfx_y=ky+2;
+gfx_drawstr("A:"); draw_note(a_low); gfx_drawstr("-"); draw_note(a_high);
 gfx_drawstr(" ch"); gfx_drawnumber(a_in_ch+1,0);
 
-// B labels
 gfx_r=0.88;gfx_g=0.5;gfx_b=1;gfx_a=1;
-gfx_x=bx1+2;gfx_y=ky+kh/2+3;
-gfx_drawstr("B:"); draw_note(b_low); gfx_drawstr("–"); draw_note(b_high);
+gfx_x=bx1+3;gfx_y=ky+kh/2+3;
+gfx_drawstr("B:"); draw_note(b_low); gfx_drawstr("-"); draw_note(b_high);
 gfx_drawstr(" ch"); gfx_drawnumber(b_in_ch+1,0);
 
 // ── OUTPUT + OVERLAP BAR ─────────────────────────────────
@@ -240,69 +265,84 @@ gfx_setfont(1,"Arial",10,0);
 gfx_r=0.35;gfx_g=1;gfx_b=0.4;gfx_a=1;
 gfx_x=kx+6;gfx_y=ky+kh+7;
 gfx_drawstr("OUT ch:"); gfx_drawnumber(out_ch+1,0);
-gfx_drawstr("    Overlap: ");
-ovl_mode==0?(gfx_r=1;gfx_g=0.85;gfx_b=0.1;gfx_drawstr("Both")):
-ovl_mode==1?(gfx_r=0.45;gfx_g=0.85;gfx_b=1;gfx_drawstr("A priority")):
-            (gfx_r=0.88;gfx_g=0.5;gfx_b=1; gfx_drawstr("B priority"));
+gfx_drawstr("  Overlap: ");
+ovl_mode==0?(gfx_r=1;   gfx_g=0.85;gfx_b=0.1; gfx_drawstr("Both")):
+ovl_mode==1?(gfx_r=0.45;gfx_g=0.85;gfx_b=1;   gfx_drawstr("A priority")):
+            (gfx_r=0.88;gfx_g=0.5; gfx_b=1;   gfx_drawstr("B priority"));
 gfx_r=0.4;gfx_g=0.4;gfx_b=0.55;gfx_a=1;
-gfx_drawstr("    Other: ");
+gfx_drawstr("  Other: ");
 other==0?(gfx_r=0.4;gfx_g=0.8;gfx_b=0.4;gfx_drawstr("PASS")):
-         (gfx_r=1;gfx_g=0.3;gfx_b=0.3;gfx_drawstr("BLOCK"));
+         (gfx_r=1;  gfx_g=0.3;gfx_b=0.3;gfx_drawstr("BLOCK"));
 
 // ── THREE STATUS PANELS ──────────────────────────────────
-py=ky+kh+30; pw=(gfx_w-40)/3; ph=110; gap=10;
+py=ky+kh+30; pw=(gfx_w-40)/3; ph=120; gap=10;
 px0=10; px1=px0+pw+gap; px2=px1+pw+gap;
 
 // REGION A
-a_active?(draw_box(px0,py,pw,ph,0.04,0.2,0.36);gfx_r=0.4;gfx_g=0.85;gfx_b=1;):
+a_active?(draw_box(px0,py,pw,ph,0.04,0.2,0.36); gfx_r=0.4; gfx_g=0.85;gfx_b=1;):
          (draw_box(px0,py,pw,ph,0.07,0.09,0.13);gfx_r=0.28;gfx_g=0.45;gfx_b=0.58;);
-gfx_a=1;gfx_setfont(1,"Arial",11,'b');
-gfx_x=px0+6;gfx_y=py+5;gfx_drawstr("REGION A");
+gfx_a=1; gfx_setfont(1,"Arial",11,'b');
+gfx_x=px0+6;gfx_y=py+5; gfx_drawstr("REGION A");
 gfx_setfont(1,"Arial",9,0);
-gfx_x=px0+6;gfx_y=py+22;gfx_drawstr("ch:"); gfx_drawnumber(a_in_ch+1,0);
-gfx_drawstr("  ");draw_note(a_low);gfx_drawstr("–");draw_note(a_high);
+gfx_x=px0+6;gfx_y=py+22; gfx_drawstr("ch:"); gfx_drawnumber(a_in_ch+1,0);
+gfx_drawstr("  "); draw_note(a_low); gfx_drawstr("-"); draw_note(a_high);
 gfx_setfont(1,"Arial",18,'b');
-gfx_x=px0+6;gfx_y=py+36;draw_note(a_last_note);
+gfx_x=px0+6;gfx_y=py+36; draw_note(a_last_note);
+gfx_setfont(1,"Arial",10,0);
+gfx_r=0.5;gfx_g=0.7;gfx_b=0.85;gfx_a=1;
+gfx_x=px0+6;gfx_y=py+62;
+a_last_note>=0?(gfx_drawstr("#");gfx_drawnumber(a_last_note,0);):gfx_drawstr("#--");
 gfx_setfont(1,"Arial",9,0);
-gfx_x=px0+6;gfx_y=py+66;gfx_drawstr("vel:");
+gfx_r=0.5;gfx_g=0.75;gfx_b=0.5;gfx_a=1;
+gfx_x=px0+6;gfx_y=py+78; gfx_drawstr("vel:");
 a_last_note>=0?gfx_drawnumber(a_last_vel,0):gfx_drawstr("--");
 gfx_r=1;gfx_g=0.38;gfx_b=0.38;gfx_a=1;
-gfx_x=px0+6;gfx_y=py+82;gfx_drawstr("blk:"); gfx_drawnumber(a_blocked,0);
+gfx_x=px0+6;gfx_y=py+92; gfx_drawstr("blk:"); gfx_drawnumber(a_blocked,0);
 a_active?(gfx_r=0.3;gfx_g=1;gfx_b=0.5;):(gfx_r=0.3;gfx_g=0.4;gfx_b=0.5;);
-gfx_x=px0+6;gfx_y=py+96;gfx_drawstr(a_active?"● ACTIVE":"○ idle");
+gfx_x=px0+6;gfx_y=py+106; gfx_drawstr(a_active?"* ACTIVE":"o idle");
 
 // REGION B
-b_active?(draw_box(px1,py,pw,ph,0.25,0.07,0.3);gfx_r=0.88;gfx_g=0.5;gfx_b=1;):
-         (draw_box(px1,py,pw,ph,0.09,0.07,0.13);gfx_r=0.5;gfx_g=0.32;gfx_b=0.58;);
-gfx_a=1;gfx_setfont(1,"Arial",11,'b');
-gfx_x=px1+6;gfx_y=py+5;gfx_drawstr("REGION B");
+b_active?(draw_box(px1,py,pw,ph,0.25,0.07,0.3); gfx_r=0.88;gfx_g=0.5;gfx_b=1;):
+         (draw_box(px1,py,pw,ph,0.09,0.07,0.13);gfx_r=0.5; gfx_g=0.32;gfx_b=0.58;);
+gfx_a=1; gfx_setfont(1,"Arial",11,'b');
+gfx_x=px1+6;gfx_y=py+5; gfx_drawstr("REGION B");
 gfx_setfont(1,"Arial",9,0);
-gfx_x=px1+6;gfx_y=py+22;gfx_drawstr("ch:"); gfx_drawnumber(b_in_ch+1,0);
-gfx_drawstr("  ");draw_note(b_low);gfx_drawstr("–");draw_note(b_high);
+gfx_x=px1+6;gfx_y=py+22; gfx_drawstr("ch:"); gfx_drawnumber(b_in_ch+1,0);
+gfx_drawstr("  "); draw_note(b_low); gfx_drawstr("-"); draw_note(b_high);
 gfx_setfont(1,"Arial",18,'b');
-gfx_x=px1+6;gfx_y=py+36;draw_note(b_last_note);
+gfx_x=px1+6;gfx_y=py+36; draw_note(b_last_note);
+gfx_setfont(1,"Arial",10,0);
+gfx_r=0.7;gfx_g=0.5;gfx_b=0.85;gfx_a=1;
+gfx_x=px1+6;gfx_y=py+62;
+b_last_note>=0?(gfx_drawstr("#");gfx_drawnumber(b_last_note,0);):gfx_drawstr("#--");
 gfx_setfont(1,"Arial",9,0);
-gfx_x=px1+6;gfx_y=py+66;gfx_drawstr("vel:");
+gfx_r=0.6;gfx_g=0.4;gfx_b=0.75;gfx_a=1;
+gfx_x=px1+6;gfx_y=py+78; gfx_drawstr("vel:");
 b_last_note>=0?gfx_drawnumber(b_last_vel,0):gfx_drawstr("--");
 gfx_r=1;gfx_g=0.38;gfx_b=0.38;gfx_a=1;
-gfx_x=px1+6;gfx_y=py+82;gfx_drawstr("blk:"); gfx_drawnumber(b_blocked,0);
+gfx_x=px1+6;gfx_y=py+92; gfx_drawstr("blk:"); gfx_drawnumber(b_blocked,0);
 b_active?(gfx_r=0.55;gfx_g=0.3;gfx_b=1;):(gfx_r=0.4;gfx_g=0.3;gfx_b=0.5;);
-gfx_x=px1+6;gfx_y=py+96;gfx_drawstr(b_active?"● ACTIVE":"○ idle");
+gfx_x=px1+6;gfx_y=py+106; gfx_drawstr(b_active?"* ACTIVE":"o idle");
 
 // OUT
-out_active?(draw_box(px2,py,pw,ph,0.06,0.25,0.08);gfx_r=0.35;gfx_g=1;gfx_b=0.42;):
-           (draw_box(px2,py,pw,ph,0.07,0.11,0.07);gfx_r=0.3;gfx_g=0.5;gfx_b=0.33;);
-gfx_a=1;gfx_setfont(1,"Arial",11,'b');
-gfx_x=px2+6;gfx_y=py+5;gfx_drawstr("OUT");
+out_active?(draw_box(px2,py,pw,ph,0.06,0.25,0.08);gfx_r=0.35;gfx_g=1;  gfx_b=0.42;):
+           (draw_box(px2,py,pw,ph,0.07,0.11,0.07);gfx_r=0.3; gfx_g=0.5;gfx_b=0.33;);
+gfx_a=1; gfx_setfont(1,"Arial",11,'b');
+gfx_x=px2+6;gfx_y=py+5; gfx_drawstr("OUT");
 gfx_setfont(1,"Arial",9,0);
-gfx_x=px2+6;gfx_y=py+22;gfx_drawstr("ch:"); gfx_drawnumber(out_ch+1,0);
+gfx_x=px2+6;gfx_y=py+22; gfx_drawstr("ch:"); gfx_drawnumber(out_ch+1,0);
 gfx_setfont(1,"Arial",18,'b');
-gfx_x=px2+6;gfx_y=py+36;draw_note(out_last_note);
+gfx_x=px2+6;gfx_y=py+36; draw_note(out_last_note);
+gfx_setfont(1,"Arial",10,0);
+gfx_r=0.35;gfx_g=0.85;gfx_b=0.5;gfx_a=1;
+gfx_x=px2+6;gfx_y=py+62;
+out_last_note>=0?(gfx_drawstr("#");gfx_drawnumber(out_last_note,0);):gfx_drawstr("#--");
 gfx_setfont(1,"Arial",9,0);
-gfx_x=px2+6;gfx_y=py+66;gfx_drawstr("vel:");
+gfx_r=0.3;gfx_g=0.7;gfx_b=0.4;gfx_a=1;
+gfx_x=px2+6;gfx_y=py+78; gfx_drawstr("vel:");
 out_last_note>=0?gfx_drawnumber(out_last_vel,0):gfx_drawstr("--");
 out_active?(gfx_r=0.3;gfx_g=1;gfx_b=0.45;):(gfx_r=0.28;gfx_g=0.45;gfx_b=0.32;);
-gfx_x=px2+6;gfx_y=py+96;gfx_drawstr(out_active?"● ACTIVE":"○ idle");
+gfx_x=px2+6;gfx_y=py+106; gfx_drawstr(out_active?"* ACTIVE":"o idle");
 
 // ── MIDI LOG TABLE ───────────────────────────────────────
 log_top = py+ph+10;
@@ -333,7 +373,7 @@ loop(LOG_SIZE,
   lstatus>0 ? (
     gfx_setfont(1,"Arial",9,0);
 
-    // DIR
+    // DIR badge
     ldir==0?(
       draw_box(lx_dir,ry+3,34,15,0.04,0.18,0.1);
       gfx_r=0.3;gfx_g=1;gfx_b=0.5;gfx_x=lx_dir+5;gfx_y=ry+6;gfx_drawstr(" IN");
@@ -346,22 +386,22 @@ loop(LOG_SIZE,
     // STATUS
     gfx_r=0.5;gfx_g=0.6;gfx_b=0.85;gfx_a=1;
     gfx_x=lx_st;gfx_y=ry+6;
-    draw_hex(lstatus&0xF0);gfx_drawstr(" ");
-    (lstatus&0xF0)==0x90?gfx_drawstr("NOn"):
+    draw_hex(lstatus&0xF0); gfx_drawstr(" ");
+    (lstatus&0xF0)==0x90?gfx_drawstr("NOn") :
     (lstatus&0xF0)==0x80?gfx_drawstr("NOff"):
-    (lstatus&0xF0)==0xA0?gfx_drawstr("AT"):
-    (lstatus&0xF0)==0xB0?gfx_drawstr("CC"):gfx_drawstr("??");
+    (lstatus&0xF0)==0xA0?gfx_drawstr("AT")  :
+    (lstatus&0xF0)==0xB0?gfx_drawstr("CC")  :gfx_drawstr("??");
 
     // CH
     gfx_r=0.55;gfx_g=0.55;gfx_b=0.7;gfx_a=1;
     gfx_x=lx_ch;gfx_y=ry+6;gfx_drawnumber((lstatus&0x0F)+1,0);
 
     // NOTE
-    linterp==2||linterp==3?(gfx_r=0.4;gfx_g=0.4;gfx_b=0.45;):
+    linterp==2||linterp==3||linterp==7?(gfx_r=0.35;gfx_g=0.3;gfx_b=0.3;):
     ldir==0?(gfx_r=0.4;gfx_g=0.88;gfx_b=1;):
-            (gfx_r=1;gfx_g=0.62;gfx_b=0.2;);
-    gfx_a=1;gfx_x=lx_note;gfx_y=ry+6;
-    draw_note(lnote);gfx_drawstr("(");gfx_drawnumber(lnote,0);gfx_drawstr(")");
+            (gfx_r=1;  gfx_g=0.62;gfx_b=0.2;);
+    gfx_a=1; gfx_x=lx_note;gfx_y=ry+6;
+    draw_note(lnote); gfx_drawstr("("); gfx_drawnumber(lnote,0); gfx_drawstr(")");
 
     // VEL
     gfx_r=0.5;gfx_g=0.5;gfx_b=0.62;gfx_a=1;
@@ -369,19 +409,20 @@ loop(LOG_SIZE,
 
     // INTERPRETATION
     gfx_x=lx_int;gfx_y=ry+6;
-    linterp==0&&ldir==0?(gfx_r=0.4;gfx_g=0.88;gfx_b=1;   gfx_drawstr("Region A → accepted");):
-    linterp==1&&ldir==0?(gfx_r=0.88;gfx_g=0.5;gfx_b=1;   gfx_drawstr("Region B → accepted");):
-    linterp==6&&ldir==0?(gfx_r=1;gfx_g=0.85;gfx_b=0.1;   gfx_drawstr("A+B overlap → accepted");):
-    linterp==0&&ldir==1?(gfx_r=0.32;gfx_g=1;gfx_b=0.44;  gfx_drawstr("→ routed out (A)");):
-    linterp==1&&ldir==1?(gfx_r=0.32;gfx_g=1;gfx_b=0.44;  gfx_drawstr("→ routed out (B)");):
-    linterp==6&&ldir==1?(gfx_r=1;gfx_g=0.85;gfx_b=0.1;   gfx_drawstr("→ routed out (both)");):
-    linterp==2         ?(gfx_r=0.5;gfx_g=0.35;gfx_b=0.35;gfx_drawstr("Region A → BLOCKED");):
-    linterp==3         ?(gfx_r=0.5;gfx_g=0.35;gfx_b=0.35;gfx_drawstr("Region B → BLOCKED");):
-    linterp==5&&ldir==0?(gfx_r=0.6;gfx_g=0.4;gfx_b=0.4;  gfx_drawstr("Note Off → in");):
-    linterp==5&&ldir==1?(gfx_r=1;gfx_g=0.35;gfx_b=0.35;  gfx_drawstr("→ Note Off sent");):
-    linterp==4&&ldir==0?(gfx_r=0.45;gfx_g=0.45;gfx_b=0.55;gfx_drawstr("non-note → passthru");):
-    linterp==4&&ldir==1?(gfx_r=0.38;gfx_g=0.38;gfx_b=0.5;gfx_drawstr("→ forwarded");):
-                        (gfx_r=0.35;gfx_g=0.35;gfx_b=0.4;gfx_drawstr("—"););
+    linterp==0&&ldir==0?(gfx_r=0.4; gfx_g=0.88;gfx_b=1;    gfx_drawstr("Region A -> accepted")):
+    linterp==1&&ldir==0?(gfx_r=0.88;gfx_g=0.5; gfx_b=1;    gfx_drawstr("Region B -> accepted")):
+    linterp==6&&ldir==0?(gfx_r=1;   gfx_g=0.85;gfx_b=0.1;  gfx_drawstr("A+B overlap -> accepted")):
+    linterp==2&&ldir==0?(gfx_r=1;   gfx_g=0.45;gfx_b=0.1;  gfx_drawstr("range A, wrong ch -> BLOCKED")):
+    linterp==3&&ldir==0?(gfx_r=1;   gfx_g=0.45;gfx_b=0.1;  gfx_drawstr("range B, wrong ch -> BLOCKED")):
+    linterp==7&&ldir==0?(gfx_r=0.5; gfx_g=0.3; gfx_b=0.3;  gfx_drawstr("outside regions -> BLOCKED")):
+    linterp==0&&ldir==1?(gfx_r=0.32;gfx_g=1;   gfx_b=0.44; gfx_drawstr("-> routed out (A)")):
+    linterp==1&&ldir==1?(gfx_r=0.32;gfx_g=1;   gfx_b=0.44; gfx_drawstr("-> routed out (B)")):
+    linterp==6&&ldir==1?(gfx_r=1;   gfx_g=0.85;gfx_b=0.1;  gfx_drawstr("-> routed out (both)")):
+    linterp==5&&ldir==0?(gfx_r=0.6; gfx_g=0.4; gfx_b=0.4;  gfx_drawstr("Note Off -> in")):
+    linterp==5&&ldir==1?(gfx_r=1;   gfx_g=0.35;gfx_b=0.35; gfx_drawstr("-> Note Off sent")):
+    linterp==4&&ldir==0?(gfx_r=0.45;gfx_g=0.45;gfx_b=0.55; gfx_drawstr("non-note -> in")):
+    linterp==4&&ldir==1?(gfx_r=0.38;gfx_g=0.38;gfx_b=0.5;  gfx_drawstr("-> forwarded")):
+                        (gfx_r=0.32;gfx_g=0.32;gfx_b=0.38; gfx_drawstr("-"));
     gfx_a=1;
   );
   ri+=1;
@@ -389,5 +430,7 @@ loop(LOG_SIZE,
 
 gfx_setfont(1,"Arial",8,0);
 gfx_r=0.28;gfx_g=0.28;gfx_b=0.38;gfx_a=1;
-gfx_x=gfx_w-46;gfx_y=log_top+20;gfx_drawstr("newest");
-gfx_x=gfx_w-44;gfx_y=log_top+18+row_h*(LOG_SIZE-1);gfx_drawstr("oldest");
+gfx_x=gfx_w-46; gfx_y=log_top+20;
+gfx_drawstr("newest");
+gfx_x=gfx_w-44; gfx_y=log_top+18+row_h*(LOG_SIZE-1);
+gfx_drawstr("oldest");
