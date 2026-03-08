@@ -1,9 +1,6 @@
 desc: MIDI hold notes range
 author: tomaszpio
 version: 1.0.0
-about:
-  This JSFX plugin implements a "note hold" function, active only within
-  a specified MIDI note range.
 
 slider1:0<0,16,1>Channel (0=omni)
 slider2:36<0,127,1>Low note
@@ -13,7 +10,7 @@ out_pin:none
 
 @init
 held_note = -1;
-held_chan = -1;
+held_chan  = -1;
 
 last_in_note  = -1;
 last_in_vel   = -1;
@@ -21,9 +18,24 @@ last_in_chan  = -1;
 last_rel_note = -1;
 last_rel_chan  = -1;
 
-// Note name helpers: store string offsets in memory
-// We'll use memory slots 0..11 for note name chars (2 chars each = 24 slots)
-// Actually we'll just compute note names in gfx via #strings
+// RAW MIDI log — circular buffer, 8 entries
+// each entry: [type, status_byte, d1, d2, direction]
+// direction: 0=IN, 1=OUT
+// type: 0=NoteOn, 1=NoteOff, 2=other
+LOG_SIZE  = 8;
+LOG_FIELDS = 5;   // type, status, d1, d2, dir
+log_buf  = 200;   // memory offset
+log_head = 0;
+
+function log_push(dir, type, stat, d1, d2) local(idx) (
+  idx = log_head * LOG_FIELDS + log_buf;
+  idx[0] = dir;
+  idx[1] = type;
+  idx[2] = stat;
+  idx[3] = d1;
+  idx[4] = d2;
+  log_head = (log_head + 1) % LOG_SIZE;
+);
 
 @slider
 s1   = slider1|0;
@@ -31,16 +43,14 @@ chan = s1 ? (s1 - 1) : -1;
 low  = slider2|0;
 high = slider3|0;
 low > high ? (
-  tmp  = low;
-  low  = high;
-  high = tmp;
+  tmp = low; low = high; high = tmp;
 );
 
 @block
 while (
   midirecv(ts, msg, msg23) ? (
-    status = msg & $xf0;
-    ch     = msg & $x0f;
+    status = msg  & $xf0;
+    ch     = msg  & $x0f;
     note   = msg23 & $xff;
     vel    = (msg23/256) & $xff;
 
@@ -48,117 +58,277 @@ while (
     in_chan  = (chan < 0) || (ch == chan);
     in_range = (note >= low) && (note <= high);
 
+    // log raw IN
+    is_note ? (
+      log_push(0,
+        status == $x90 && vel ? 0 : 1,
+        msg & $xff, note, vel);
+    );
+
     is_note && in_chan && in_range ? (
       status == $x90 && vel ? (
-        // Log incoming note
         last_in_note = note;
         last_in_vel  = vel;
         last_in_chan  = ch + 1;
 
-        // Release previously held note
         held_note >= 0 ? (
           last_rel_note = held_note;
           last_rel_chan  = held_chan + 1;
+          // log OUT: NoteOff for prev held
+          log_push(1, 1, $x80 + held_chan, held_note, 0);
           midisend(ts, $x80 + held_chan, held_note);
         );
 
         held_note = note;
         held_chan  = ch;
+        // log OUT: NoteOn
+        log_push(1, 0, $x90 + ch, note, vel);
         midisend(ts, $x90 + ch, note | (vel << 8));
       );
+      // Note Off in range → swallowed (logged as blocked)
+      status == $x80 || (status == $x90 && !vel) ? (
+        log_push(2, 3, msg & $xff, note, vel);  // type 3 = blocked
+      );
     ) : (
+      // passthrough
+      is_note ? log_push(1, status==$x90 && vel ? 0 : 1, msg&$xff, note, vel);
       midisend(ts, msg, msg23);
     );
     1;
   );
 );
 
-@gfx 400 220
-// Colors and layout
-gfx_clear = 0x1a1a2e;   // dark navy background
+@gfx 500 420
+gfx_clear = 0x0e0e1c;
 
-// Helper: draw a filled rounded rect (simple box here)
-function draw_box(x, y, w, h, r, g, b) (
-  gfx_r = r; gfx_g = g; gfx_b = b; gfx_a = 1;
-  gfx_rect(x, y, w, h);
+function draw_box(x,y,w,h,r,g,b) (
+  gfx_r=r; gfx_g=g; gfx_b=b; gfx_a=1;
+  gfx_rect(x,y,w,h);
 );
 
-// Helper: note number -> note name string
-// Returns name in gfx_str (we write directly)
 function note_name(n) (
   n < 0 ? (
     gfx_drawstr("---");
   ) : (
-    oct = (n / 12) | 0;
-    nn  = n % 12;
-    nn == 0  ? gfx_drawstr("C")  :
-    nn == 1  ? gfx_drawstr("C#") :
-    nn == 2  ? gfx_drawstr("D")  :
-    nn == 3  ? gfx_drawstr("D#") :
-    nn == 4  ? gfx_drawstr("E")  :
-    nn == 5  ? gfx_drawstr("F")  :
-    nn == 6  ? gfx_drawstr("F#") :
-    nn == 7  ? gfx_drawstr("G")  :
-    nn == 8  ? gfx_drawstr("G#") :
-    nn == 9  ? gfx_drawstr("A")  :
-    nn == 10 ? gfx_drawstr("A#") :
-               gfx_drawstr("B");
-    gfx_drawnumber(oct - 1, 0);
+    oct = (n/12)|0;
+    nn  = n%12;
+    nn==0  ? gfx_drawstr("C")  :
+    nn==1  ? gfx_drawstr("C#") :
+    nn==2  ? gfx_drawstr("D")  :
+    nn==3  ? gfx_drawstr("D#") :
+    nn==4  ? gfx_drawstr("E")  :
+    nn==5  ? gfx_drawstr("F")  :
+    nn==6  ? gfx_drawstr("F#") :
+    nn==7  ? gfx_drawstr("G")  :
+    nn==8  ? gfx_drawstr("G#") :
+    nn==9  ? gfx_drawstr("A")  :
+    nn==10 ? gfx_drawstr("A#") :
+             gfx_drawstr("B");
+    gfx_drawnumber(oct-1, 0);
   );
 );
 
-gfx_setfont(1, "Arial", 15, 'b');
-
-// --- Title bar ---
-draw_box(0, 0, gfx_w, 28, 0.2, 0.4, 0.8);
+// ── TITLE ────────────────────────────────────────────────
+draw_box(0, 0, gfx_w, 26, 0.18, 0.35, 0.75);
+gfx_setfont(1,"Arial",14,'b');
 gfx_r=1; gfx_g=1; gfx_b=1; gfx_a=1;
-gfx_x=10; gfx_y=7;
-gfx_drawstr("MIDI Hold Notes Range  |  Monitor");
+gfx_x=10; gfx_y=5;
+gfx_drawstr("MIDI Hold Notes Range");
 
-// --- Zone info ---
-gfx_setfont(1, "Arial", 13, 0);
-draw_box(0, 30, gfx_w, 24, 0.12, 0.12, 0.22);
-gfx_r=0.6; gfx_g=0.8; gfx_b=1; gfx_a=1;
-gfx_x=10; gfx_y=37;
-gfx_drawstr("Zone: ");
+// ── ZONE BAR ─────────────────────────────────────────────
+draw_box(0, 28, gfx_w, 22, 0.1, 0.1, 0.2);
+kw = gfx_w - 20;
+low_pct  = low  / 127.0;
+high_pct = high / 127.0;
+// full keyboard bar
+gfx_r=0.15; gfx_g=0.15; gfx_b=0.25; gfx_a=1;
+gfx_rect(10, 31, kw, 16);
+// active zone highlight
+zx = (10 + low_pct*kw)|0;
+zw = ((high_pct - low_pct)*kw)|0;
+gfx_r=0.25; gfx_g=0.5; gfx_b=0.9; gfx_a=1;
+gfx_rect(zx, 31, zw, 16);
+// low marker
+gfx_r=0.4; gfx_g=0.8; gfx_b=1; gfx_a=1;
+gfx_line(zx, 29, zx, 50);
+// high marker
+hx = (10 + high_pct*kw)|0;
+gfx_line(hx, 29, hx, 50);
+// zone label
+gfx_setfont(1,"Arial",10,0);
+gfx_r=0.7; gfx_g=0.9; gfx_b=1; gfx_a=1;
+gfx_x=zx+3; gfx_y=33;
 note_name(low);
-gfx_drawstr(" - ");
+gfx_drawstr("–");
 note_name(high);
-gfx_drawstr("   Ch: ");
-chan < 0 ? gfx_drawstr("Omni") : gfx_drawnumber(chan+1, 0);
+gfx_drawstr("  ch:");
+chan < 0 ? gfx_drawstr("Omni") : gfx_drawnumber(chan+1,0);
 
-// --- Section: Last received ---
-draw_box(10, 66, gfx_w-20, 44, 0.1, 0.25, 0.15);
-gfx_r=0.4; gfx_g=1; gfx_b=0.4; gfx_a=1;
-gfx_x=18; gfx_y=72;
-gfx_drawstr("IN  ");
-gfx_setfont(1, "Arial", 20, 'b');
+// ── STATUS PANELS ─────────────────────────────────────────
+py = 56; ph = 52; pw = (gfx_w-28)/3; gap=6;
+
+// IN panel
+last_in_note >= 0 ? (
+  draw_box(8, py, pw, ph, 0.05, 0.22, 0.12);
+  gfx_r=0.3; gfx_g=1; gfx_b=0.45;
+) : (
+  draw_box(8, py, pw, ph, 0.07, 0.1, 0.08);
+  gfx_r=0.3; gfx_g=0.5; gfx_b=0.35;
+);
+gfx_a=1; gfx_setfont(1,"Arial",10,'b');
+gfx_x=14; gfx_y=py+4; gfx_drawstr("IN");
+gfx_setfont(1,"Arial",19,'b');
+gfx_x=14; gfx_y=py+16;
 note_name(last_in_note);
-gfx_setfont(1, "Arial", 13, 0);
-gfx_drawstr("  vel:");
-last_in_note >= 0 ? gfx_drawnumber(last_in_vel, 0) : gfx_drawstr("--");
-gfx_drawstr("  ch:");
-last_in_note >= 0 ? gfx_drawnumber(last_in_chan, 0) : gfx_drawstr("--");
+gfx_setfont(1,"Arial",10,0);
+gfx_x=14; gfx_y=py+38;
+gfx_drawstr("vel:"); last_in_note>=0?gfx_drawnumber(last_in_vel,0):gfx_drawstr("--");
+gfx_drawstr("  ch:"); last_in_note>=0?gfx_drawnumber(last_in_chan,0):gfx_drawstr("--");
 
-// --- Section: Currently held ---
-draw_box(10, 120, gfx_w-20, 44, 0.25, 0.15, 0.05);
-gfx_r=1; gfx_g=0.75; gfx_b=0.1; gfx_a=1;
-gfx_x=18; gfx_y=126;
-gfx_drawstr("HELD");
-gfx_setfont(1, "Arial", 20, 'b');
-gfx_x=18; gfx_y=138;
+// HELD panel
+px1 = 8+pw+gap;
+held_note >= 0 ? (
+  draw_box(px1, py, pw, ph, 0.28, 0.18, 0.02);
+  gfx_r=1; gfx_g=0.78; gfx_b=0.1;
+) : (
+  draw_box(px1, py, pw, ph, 0.12, 0.1, 0.05);
+  gfx_r=0.5; gfx_g=0.45; gfx_b=0.2;
+);
+gfx_a=1; gfx_setfont(1,"Arial",10,'b');
+gfx_x=px1+6; gfx_y=py+4; gfx_drawstr("HELD");
+gfx_setfont(1,"Arial",19,'b');
+gfx_x=px1+6; gfx_y=py+16;
 note_name(held_note);
-gfx_setfont(1, "Arial", 13, 0);
-gfx_drawstr("  ch:");
-held_note >= 0 ? gfx_drawnumber(held_chan+1, 0) : gfx_drawstr("--");
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px1+6; gfx_y=py+38;
+gfx_drawstr("ch:"); held_note>=0?gfx_drawnumber(held_chan+1,0):gfx_drawstr("--");
 
-// --- Section: Last released ---
-draw_box(10, 174, gfx_w-20, 44, 0.25, 0.08, 0.08);
-gfx_r=1; gfx_g=0.35; gfx_b=0.35; gfx_a=1;
-gfx_x=18; gfx_y=180;
-gfx_drawstr("REL ");
-gfx_setfont(1, "Arial", 20, 'b');
+// REL panel
+px2 = px1+pw+gap;
+last_rel_note >= 0 ? (
+  draw_box(px2, py, pw, ph, 0.25, 0.07, 0.07);
+  gfx_r=1; gfx_g=0.35; gfx_b=0.35;
+) : (
+  draw_box(px2, py, pw, ph, 0.1, 0.07, 0.07);
+  gfx_r=0.45; gfx_g=0.25; gfx_b=0.25;
+);
+gfx_a=1; gfx_setfont(1,"Arial",10,'b');
+gfx_x=px2+6; gfx_y=py+4; gfx_drawstr("RELEASED");
+gfx_setfont(1,"Arial",19,'b');
+gfx_x=px2+6; gfx_y=py+16;
 note_name(last_rel_note);
-gfx_setfont(1, "Arial", 13, 0);
-gfx_drawstr("  ch:");
-last_rel_note >= 0 ? gfx_drawnumber(last_rel_chan, 0) : gfx_drawstr("--");
+gfx_setfont(1,"Arial",10,0);
+gfx_x=px2+6; gfx_y=py+38;
+gfx_drawstr("ch:"); last_rel_note>=0?gfx_drawnumber(last_rel_chan,0):gfx_drawstr("--");
+
+// ── MIDI MESSAGE LOG ──────────────────────────────────────
+log_y = py + ph + 10;
+draw_box(0, log_y, gfx_w, 16, 0.08, 0.08, 0.18);
+gfx_setfont(1,"Arial",10,'b');
+gfx_r=0.6; gfx_g=0.7; gfx_b=1; gfx_a=1;
+gfx_x=10; gfx_y=log_y+2;
+gfx_drawstr("DIR    STATUS   NOTE        VEL    INTERPRETATION");
+
+row_h = 26;
+lx_dir  = 8;
+lx_stat = 50;
+lx_note = 118;
+lx_vel  = 210;
+lx_interp = 258;
+
+// draw 8 log rows newest-first
+ri = 0;
+loop(LOG_SIZE,
+  // read entry going backwards from log_head
+  entry_idx = (log_head - 1 - ri + LOG_SIZE) % LOG_SIZE;
+  base = entry_idx * LOG_FIELDS + log_buf;
+
+  dir  = base[0];   // 0=IN, 1=OUT
+  type = base[1];   // 0=NoteOn, 1=NoteOff, 2=other, 3=blocked
+  stat = base[2];
+  d1   = base[3];
+  d2   = base[4];
+
+  ry = log_y + 18 + ri*row_h;
+
+  // row background (alternating)
+  ri%2 == 0 ? (
+    draw_box(0, ry, gfx_w, row_h-1, 0.07, 0.07, 0.12);
+  ) : (
+    draw_box(0, ry, gfx_w, row_h-1, 0.05, 0.05, 0.09);
+  );
+
+  // only draw if slot has been used (stat > 0 means real data)
+  stat > 0 ? (
+    gfx_setfont(1,"Arial",10,0);
+
+    // DIR badge
+    dir == 0 ? (
+      draw_box(lx_dir, ry+4, 36, 16, 0.05, 0.25, 0.12);
+      gfx_r=0.3; gfx_g=1; gfx_b=0.5;
+    ) : (
+      draw_box(lx_dir, ry+4, 36, 16, 0.25, 0.12, 0.05);
+      gfx_r=1; gfx_g=0.6; gfx_b=0.2;
+    );
+    gfx_a=1;
+    gfx_x=lx_dir+4; gfx_y=ry+7;
+    dir==0 ? gfx_drawstr(" IN") : gfx_drawstr("OUT");
+
+    // STATUS byte hex
+    gfx_setfont(1,"Arial",10,0);
+    gfx_r=0.55; gfx_g=0.65; gfx_b=0.85; gfx_a=1;
+    gfx_x=lx_stat; gfx_y=ry+8;
+    // draw status as hex manually
+    hi = (stat >> 4) & 0xF;
+    lo =  stat       & 0xF;
+    gfx_drawstr("0x");
+    hi<10 ? gfx_drawnumber(hi,0) : (
+      hi==10?gfx_drawstr("A"): hi==11?gfx_drawstr("B"): hi==12?gfx_drawstr("C"):
+      hi==13?gfx_drawstr("D"): hi==14?gfx_drawstr("E"): gfx_drawstr("F");
+    );
+    lo<10 ? gfx_drawnumber(lo,0) : (
+      lo==10?gfx_drawstr("A"): lo==11?gfx_drawstr("B"): lo==12?gfx_drawstr("C"):
+      lo==13?gfx_drawstr("D"): lo==14?gfx_drawstr("E"): gfx_drawstr("F");
+    );
+
+    // NOTE name + number
+    type == 3 ? (
+      gfx_r=0.5; gfx_g=0.5; gfx_b=0.55;
+    ) : dir==0 ? (
+      gfx_r=0.4; gfx_g=1; gfx_b=0.5;
+    ) : (
+      gfx_r=1; gfx_g=0.65; gfx_b=0.2;
+    );
+    gfx_a=1;
+    gfx_x=lx_note; gfx_y=ry+8;
+    note_name(d1);
+    gfx_drawstr(" (");
+    gfx_drawnumber(d1,0);
+    gfx_drawstr(")");
+
+    // VEL
+    gfx_r=0.6; gfx_g=0.6; gfx_b=0.7; gfx_a=1;
+    gfx_x=lx_vel; gfx_y=ry+8;
+    gfx_drawnumber(d2,0);
+
+    // INTERPRETATION
+    gfx_x=lx_interp; gfx_y=ry+8;
+    type==0 && dir==0 ? (gfx_r=0.3; gfx_g=1;   gfx_b=0.5;  gfx_drawstr("Note On → HOLD");) :
+    type==0 && dir==1 ? (gfx_r=1;   gfx_g=0.75; gfx_b=0.1;  gfx_drawstr("Note On → sent out");) :
+    type==1 && dir==0 ? (gfx_r=0.5; gfx_g=0.5;  gfx_b=0.6;  gfx_drawstr("Note Off → passthru");) :
+    type==1 && dir==1 ? (gfx_r=1;   gfx_g=0.35; gfx_b=0.35; gfx_drawstr("Note Off → release held");) :
+    type==3           ? (gfx_r=0.4; gfx_g=0.4;  gfx_b=0.45; gfx_drawstr("Note Off → BLOCKED");) :
+                        (gfx_r=0.5; gfx_g=0.5;  gfx_b=0.55; gfx_drawstr("passthru"););
+    gfx_a=1;
+  );
+
+  ri += 1;
+);
+
+// newest indicator arrow
+gfx_setfont(1,"Arial",9,0);
+gfx_r=0.4; gfx_g=0.4; gfx_b=0.5; gfx_a=1;
+gfx_x=gfx_w-52; gfx_y=log_y+20;
+gfx_drawstr("newest");
+gfx_x=gfx_w-52; gfx_y=log_y+20+row_h*(LOG_SIZE-1);
+gfx_drawstr("oldest");
