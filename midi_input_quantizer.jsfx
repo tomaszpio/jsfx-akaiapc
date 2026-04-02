@@ -1,15 +1,22 @@
 desc: MIDI Beat Quantizer
 author: tomaszpio
-version: 1.3.0
+version: 1.6.0
 about:
   Captures incoming MIDI notes and holds them until the next DAW beat.
   On each beat boundary, queued Note Ons are fired.
   Note Off is sent only when the keyboard releases the note,
   delayed to the next beat boundary.
-  CC64 kill uses hysteresis: pedal must first reach >= 64 (armed),
-  then drop below 32 to trigger kill — prevents false triggers from
-  rising edges that pass through zero before climbing.
+  CC64 kill uses hysteresis: pedal arms at >= 10 (fast response),
+  kills when drops below 5 — safe margin for analog pedals.
+  Kill only affects notes from before the pedal release — notes played
+  while pedal is releasing are protected via generation counter.
   Non-note messages pass through unchanged.
+
+  Memory layout:
+    100..195  queue      (32 notes * 3 fields)
+    300..811  active     (128 notes * 4 fields: note, ch, pending_off, generation)
+    900..979  CC64 wave  (80 slots)
+    1000..1049 log       (10 entries * 5 fields)
 
 slider1:0<0,16,1>Channel (0=omni)
 slider2:0<0,3,1{1/1,1/2,1/4,1/8}>Quantize grid
@@ -22,10 +29,12 @@ QUEUE_SIZE  = 32;
 QUEUE_BASE  = 100;
 queue_count = 0;
 
-ACTIVE_BASE  = 300;
-active_count = 0;
+ACTIVE_BASE   = 300;
+// 128 notes * 4 fields = 512 slots -> 300..811
+memset(ACTIVE_BASE, 0, 128*4);
+active_count  = 0;
 
-memset(ACTIVE_BASE, 0, 128*3);
+pedal_generation = 0;
 
 last_beat     = -1;
 queued_count  = 0;
@@ -37,13 +46,13 @@ last_vel_out  = 0;
 last_ch_in    = -1;
 cc64_kills    = 0;
 
-CC64_ARM_THRESH  = 64;
-CC64_KILL_THRESH = 32;
+CC64_ARM_THRESH  = 10;  // arm fast — pedal barely pressed
+CC64_KILL_THRESH = 5;   // kill just above zero — safe for analog pedals
 cc64_val         = 0;
 cc64_armed       = 0;
 
 CC64_WAVE_SIZE = 80;
-CC64_WAVE_BASE = 600;
+CC64_WAVE_BASE = 900;   // 900..979
 cc64_wave_head = 0;
 memset(CC64_WAVE_BASE, 0, CC64_WAVE_SIZE);
 
@@ -55,7 +64,7 @@ function cc64_wave_push(v) local(base) (
 
 LOG_SIZE   = 10;
 LOG_FIELDS = 5;
-LOG_BASE   = 800;
+LOG_BASE   = 1000;      // 1000..1049
 log_head   = 0;
 log_count  = 0;
 
@@ -84,16 +93,18 @@ function queue_clear() (
   queue_count = 0;
 );
 
+// active slot: base[0]=note, base[1]=ch, base[2]=pending_off, base[3]=generation
 function active_add(anote, ach) local(base) (
-  base = ACTIVE_BASE + anote * 3;
+  base = ACTIVE_BASE + anote * 4;
   base[0] = anote;
   base[1] = ach;
   base[2] = 0;
+  base[3] = pedal_generation;
   active_count += 1;
 );
 
 function active_mark_off(anote) local(base) (
-  base = ACTIVE_BASE + anote * 3;
+  base = ACTIVE_BASE + anote * 4;
   base[0] == anote && base[2] == 0 ? (
     base[2] = 1;
   );
@@ -102,11 +113,11 @@ function active_mark_off(anote) local(base) (
 function flush_pending_offs(ts) local(n, base) (
   n = 0;
   loop(128,
-    base = ACTIVE_BASE + n * 3;
-    base[2] == 1 ? (
+    base = ACTIVE_BASE + n * 4;
+    base[2] == 1 && !cc64_armed ? (  // hold Note Off while pedal is armed
       midisend(ts, 0x80 | base[1], base[0]);
       log_push(1, 0x80 | base[1], base[1], base[0], 0);
-      base[0] = 0; base[1] = 0; base[2] = 0;
+      base[0] = 0; base[1] = 0; base[2] = 0; base[3] = 0;
       active_count > 0 ? active_count -= 1;
     );
     n += 1;
@@ -116,17 +127,19 @@ function flush_pending_offs(ts) local(n, base) (
 function kill_all_active(ts) local(n, base) (
   n = 0;
   loop(128,
-    base = ACTIVE_BASE + n * 3;
-    (base[0] > 0 || base[1] > 0 || base[2] > 0) ? (
+    base = ACTIVE_BASE + n * 4;
+    // only kill notes from previous generation — protects notes played during pedal release
+    (base[0] > 0 || base[1] > 0 || base[2] > 0) && base[3] < pedal_generation ? (
       midisend(ts, 0x80 | base[1], base[0]);
       log_push(1, 0x80 | base[1], base[1], base[0], 0);
-      base[0] = 0; base[1] = 0; base[2] = 0;
+      base[0] = 0; base[1] = 0; base[2] = 0; base[3] = 0;
       active_count > 0 ? active_count -= 1;
     );
     n += 1;
   );
   queue_clear();
   cc64_kills += 1;
+  pedal_generation += 1;  // new notes added after this are safe
 );
 
 function flush_queue(ts) local(i, base, anote, avel, ach) (
@@ -188,7 +201,7 @@ while (midirecv(offset, msg1, msg23)) (
     log_push(0, status | in_ch, in_ch, note, vel);
     active_mark_off(note);
 
-  ) : is_cc && note == 64 ? (
+  ) : is_cc && note == 64 && in_chan ? (
     cc64_val = vel;
     cc64_wave_push(vel);
 
@@ -200,9 +213,10 @@ while (midirecv(offset, msg1, msg23)) (
       log_push(0, status | in_ch, in_ch, 64, vel);
       kill_all_active(offset);
       cc64_armed = 0;
+      // kill event consumed, not forwarded downstream
+    ) : (
+      midisend(offset, msg1, msg23);
     );
-
-    midisend(offset, msg1, msg23);
 
   ) : (
     midisend(offset, msg1, msg23);
@@ -241,7 +255,7 @@ draw_box(0,0,gfx_w,26, 0.12,0.24,0.48);
 gfx_setfont(1,"Arial",14,'b');
 gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
 gfx_x=10;gfx_y=5;
-gfx_drawstr("MIDI Beat Quantizer  v1.3");
+gfx_drawstr("MIDI Beat Quantizer  v1.6");
 
 play_state?(draw_box(0,28,gfx_w,20,0.05,0.28,0.08);gfx_r=0.3;gfx_g=1;gfx_b=0.42;):
            (draw_box(0,28,gfx_w,20,0.22,0.06,0.06);gfx_r=0.9;gfx_g=0.3;gfx_b=0.3;);
