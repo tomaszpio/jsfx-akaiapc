@@ -1,11 +1,11 @@
 desc: TP MIDI Note Toggle (Range)
 author: tomaszpio
-version: 1.3.0
+version: 1.4.0
 about:
   Toggles MIDI notes within a defined range and channel.
   Only Note On messages flip the toggle state.
   Toggle ON: sends Note On. Toggle OFF: sends Note Off.
-  Note Off messages always pass through unchanged.
+  Note Off messages within range and channel are blocked.
   Notes outside range or channel pass through unchanged.
   All other MIDI messages pass through unchanged.
 
@@ -54,7 +54,18 @@ while (midirecv(offset, msg1, msg2, msg3)) (
   in_range    = (note >= range_lo && note <= range_hi);
   ch_match    = (tgt_ch < 0) || (channel == tgt_ch);
 
-  is_note_on && in_range && ch_match ? (
+  is_note_off && in_range && ch_match ? (
+    eb = ev_buf + ev_head * ESIZE;
+    eb[0] = 2;
+    eb[1] = channel;
+    eb[2] = note;
+    eb[3] = vel;
+    eb[4] = 4;
+    eb[5] = 0;
+    ev_head  = (ev_head + 1) % MAX_EV;
+    ev_count = min(ev_count + 1, MAX_EV);
+
+  ) : is_note_on && in_range && ch_match ? (
     last_vel[note] = vel;
 
     toggle_state[note] = 1 - toggle_state[note];
@@ -130,7 +141,7 @@ fill_rect(0,0,W,26);
 gfx_setfont(1,"Arial",14,'b');
 set_rgb(1,1,1);
 gfx_x=10; gfx_y=5;
-gfx_drawstr("TP MIDI Note Toggle  /  Range");
+gfx_drawstr("TP MIDI Note Toggle  /  Range  v1.4");
 
 // ── SETTINGS BAR ─────────────────────────────────────────
 set_rgb(0.07,0.07,0.16);
@@ -172,24 +183,24 @@ fo = flash_on  / FLASH_DUR; fo < 0 ? fo = 0;
 ff = flash_off / FLASH_DUR; ff < 0 ? ff = 0;
 
 set_rgb(0.07+0.18*fo, 0.38+0.42*fo, 0.10+0.05*fo);
-fill_rect(10,56,155,22);
+fill_rect(10,56,150,22);
 set_rgb(0.6+0.4*fo, 1, 0.5+0.3*fo);
 gfx_setfont(1,"Arial",10,'b');
 gfx_x=18; gfx_y=61;
-gfx_drawstr("TOGGLE  ->  NOTE ON");
+gfx_drawstr("TOGGLE -> NOTE ON");
 
 set_rgb(0.26+0.18*ff, 0.06, 0.06+0.04*ff);
-fill_rect(175,56,155,22);
+fill_rect(168,56,150,22);
 set_rgb(1, 0.32+0.38*ff, 0.32+0.12*ff);
-gfx_x=183; gfx_y=61;
-gfx_drawstr("TOGGLE  ->  NOTE OFF");
+gfx_x=176; gfx_y=61;
+gfx_drawstr("TOGGLE -> NOTE OFF");
 
-set_rgb(0.08,0.08,0.14);
-fill_rect(340,56,W-350,22);
-set_rgb(0.38,0.38,0.52);
+set_rgb(0.14,0.06,0.06);
+fill_rect(326,56,W-336,22);
+set_rgb(0.5,0.28,0.28);
 gfx_setfont(1,"Arial",9,0);
-gfx_x=348; gfx_y=61;
-gfx_drawstr("NoteOff always passthru");
+gfx_x=334; gfx_y=61;
+gfx_drawstr("NoteOff in range blocked");
 
 // ── NOTE RANGE BAR ───────────────────────────────────────
 bary=86; barh=24; barx=10; barw=W-20;
@@ -339,6 +350,7 @@ loop(ev_count,
     gfx_x=lx_act; gfx_y=ry+5;
     esent==1 ? (set_rgb(0.3,1,0.5);    gfx_drawstr("toggle ON  -> sent NoteOn"))  :
     esent==2 ? (set_rgb(1,0.38,0.35);  gfx_drawstr("toggle OFF -> sent NoteOff")) :
+    esent==4 ? (set_rgb(0.5,0.28,0.28);gfx_drawstr("NoteOff in range -> BLOCKED")):
                (set_rgb(0.4,0.4,0.55); gfx_drawstr("out of range/ch -> passthru"));
     gfx_a=1;
   );
