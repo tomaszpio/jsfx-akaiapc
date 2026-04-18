@@ -1,0 +1,383 @@
+desc: MIDI 4 Channel Router
+author: tomaszpio
+version: 2.1.0
+about:
+  4 independent routing slots.
+  Each slot: define input channel and output channel.
+  Enable/bypass per slot.
+  Messages on matched input channel are rerouted to output channel.
+  Unmatched messages pass through unchanged.
+  v2.1.0: fixed stuck notes on slider change, fixed s_active on passthrough Note Off.
+
+slider1:0<0,1,1{Bypass,Route}>Slot 1 — enable
+slider2:1<1,16,1>Slot 1 — input channel
+slider3:1<1,16,1>Slot 1 — output channel
+slider4:0<0,1,1{Bypass,Route}>Slot 2 — enable
+slider5:2<1,16,1>Slot 2 — input channel
+slider6:2<1,16,1>Slot 2 — output channel
+slider7:0<0,1,1{Bypass,Route}>Slot 3 — enable
+slider8:3<1,16,1>Slot 3 — input channel
+slider9:3<1,16,1>Slot 3 — output channel
+slider10:0<0,1,1{Bypass,Route}>Slot 4 — enable
+slider11:4<1,16,1>Slot 4 — input channel
+slider12:4<1,16,1>Slot 4 — output channel
+
+in_pin:none
+out_pin:none
+
+@init
+s1_last_note=-1; s1_last_vel=0; s1_active=0; s1_routed=0; s1_out_ch=-1;
+s2_last_note=-1; s2_last_vel=0; s2_active=0; s2_routed=0; s2_out_ch=-1;
+s3_last_note=-1; s3_last_vel=0; s3_active=0; s3_routed=0; s3_out_ch=-1;
+s4_last_note=-1; s4_last_vel=0; s4_active=0; s4_routed=0; s4_out_ch=-1;
+
+LOG_SIZE   = 10;
+LOG_FIELDS = 6;  // dir, status, in_ch, out_ch, note, vel  (out_ch=-1 means bypass/unmatched)
+LOG_BASE   = 300;
+log_head   = 0;
+log_count  = 0;
+
+function log_push(ldir, lstatus, linch, loutch, lnote, lvel) local(base) (
+  base = LOG_BASE + log_head * LOG_FIELDS;
+  base[0] = ldir;
+  base[1] = lstatus;
+  base[2] = linch;
+  base[3] = loutch;
+  base[4] = lnote;
+  base[5] = lvel;
+  log_head = (log_head + 1) % LOG_SIZE;
+  log_count < LOG_SIZE ? log_count += 1;
+);
+
+// Send Note Off for a given note on a given channel (used for cleanup)
+function send_note_off(ch, note) (
+  note >= 0 ? (
+    midisend(0, 0x80 | ch, note | (64 << 8));
+    log_push(1, 0x80 | ch, ch, ch, note, 0);
+  );
+);
+
+// Release any active note for a slot, sending Note Off on the channel
+// the Note On was originally routed to (s_out_ch tracks this).
+function flush_slot(sidx) (
+  sidx==0 ? ( s1_active ? ( send_note_off(s1_out_ch, s1_last_note); s1_active=0; s1_last_note=-1; ) ):
+  sidx==1 ? ( s2_active ? ( send_note_off(s2_out_ch, s2_last_note); s2_active=0; s2_last_note=-1; ) ):
+  sidx==2 ? ( s3_active ? ( send_note_off(s3_out_ch, s3_last_note); s3_active=0; s3_last_note=-1; ) ):
+            ( s4_active ? ( send_note_off(s4_out_ch, s4_last_note); s4_active=0; s4_last_note=-1; ) );
+);
+
+@slider
+// ── BUG FIX: flush active notes before reconfiguring ──────────────────────
+// If a note is held and the user changes channel mapping or toggles bypass,
+// we must send Note Off on the OLD output channel before the config changes.
+// Without this, the Note Off would go to the new channel (or be lost entirely),
+// leaving the synth with a stuck note.
+flush_slot(0);
+flush_slot(1);
+flush_slot(2);
+flush_slot(3);
+
+en1  = slider1|0;  in1  = (slider2|0)  - 1;  out1 = (slider3|0)  - 1;
+en2  = slider4|0;  in2  = (slider5|0)  - 1;  out2 = (slider6|0)  - 1;
+en3  = slider7|0;  in3  = (slider8|0)  - 1;  out3 = (slider9|0)  - 1;
+en4  = slider10|0; in4  = (slider11|0) - 1;  out4 = (slider12|0) - 1;
+
+@block
+while (midirecv(offset, msg1, msg23)) (
+  status = msg1 & 0xF0;
+  in_ch  = msg1 & 0x0F;
+  note   = msg23 & 0xFF;
+  vel    = (msg23 >> 8) & 0xFF;
+
+  is_note_on  = (status == 0x90) && vel > 0;
+  is_note_off = (status == 0x80) || ((status == 0x90) && vel == 0);
+
+  // find first matching enabled slot
+  matched = 0;
+  slot    = -1;
+  out_ch  = in_ch;
+
+  !matched && en1 && in_ch == in1 ? (matched=1; slot=0; out_ch=out1;);
+  !matched && en2 && in_ch == in2 ? (matched=1; slot=1; out_ch=out2;);
+  !matched && en3 && in_ch == in3 ? (matched=1; slot=2; out_ch=out3;);
+  !matched && en4 && in_ch == in4 ? (matched=1; slot=3; out_ch=out4;);
+
+  matched ? (
+    log_push(0, status | in_ch, in_ch, out_ch, note, vel);
+    midisend(offset, status | out_ch, msg23);
+    log_push(1, status | out_ch, in_ch, out_ch, note, vel);
+
+    is_note_on ? (
+      slot==0 ? (s1_last_note=note; s1_last_vel=vel; s1_active=1; s1_routed+=1; s1_out_ch=out_ch;):
+      slot==1 ? (s2_last_note=note; s2_last_vel=vel; s2_active=1; s2_routed+=1; s2_out_ch=out_ch;):
+      slot==2 ? (s3_last_note=note; s3_last_vel=vel; s3_active=1; s3_routed+=1; s3_out_ch=out_ch;):
+                (s4_last_note=note; s4_last_vel=vel; s4_active=1; s4_routed+=1; s4_out_ch=out_ch;);
+    ) : is_note_off ? (
+      // ── BUG FIX: clear active flag when Note Off is matched ───────────
+      slot==0 ? (s1_active=0; s1_last_note=-1;) :
+      slot==1 ? (s2_active=0; s2_last_note=-1;) :
+      slot==2 ? (s3_active=0; s3_last_note=-1;) :
+                (s4_active=0; s4_last_note=-1;);
+    );
+
+  ) : (
+    // no slot matched — passthrough unchanged
+    log_push(0, status | in_ch, in_ch, -1, note, vel);
+    midisend(offset, msg1, msg23);
+    log_push(1, msg1, in_ch, -1, note, vel);
+
+    // ── BUG FIX: update s_active even for passthrough Note Off ───────────
+    // If a slot was active but has since been bypassed/reconfigured and
+    // the Note Off now falls through unmatched, we still clear the flag
+    // so the display doesn't show ghost "* ON" state.
+    is_note_off ? (
+      in_ch==in1 ? s1_active=0 :
+      in_ch==in2 ? s2_active=0 :
+      in_ch==in3 ? s3_active=0 :
+      in_ch==in4 ? s4_active=0;
+    );
+  );
+);
+
+@gfx 600 620
+gfx_clear = 0x0c0c18;
+
+function draw_box(x,y,w,h,r,g,b) (
+  gfx_r=r; gfx_g=g; gfx_b=b; gfx_a=1;
+  gfx_rect(x,y,w,h);
+);
+
+function draw_note(n) (
+  n < 0 ? (
+    gfx_drawstr("---");
+  ) : (
+    oct=(n/12)|0; nn=n%12;
+    nn==0?gfx_drawstr("C"):nn==1?gfx_drawstr("C#"):nn==2?gfx_drawstr("D"):
+    nn==3?gfx_drawstr("D#"):nn==4?gfx_drawstr("E"):nn==5?gfx_drawstr("F"):
+    nn==6?gfx_drawstr("F#"):nn==7?gfx_drawstr("G"):nn==8?gfx_drawstr("G#"):
+    nn==9?gfx_drawstr("A"):nn==10?gfx_drawstr("A#"):gfx_drawstr("B");
+    gfx_drawnumber(oct-1,0);
+  );
+);
+
+function draw_hex(val) local(hi,lo) (
+  hi=(val>>4)&0xF; lo=val&0xF;
+  gfx_drawstr("0x");
+  hi<10?gfx_drawnumber(hi,0):(hi==10?gfx_drawstr("A"):hi==11?gfx_drawstr("B"):hi==12?gfx_drawstr("C"):hi==13?gfx_drawstr("D"):hi==14?gfx_drawstr("E"):gfx_drawstr("F"));
+  lo<10?gfx_drawnumber(lo,0):(lo==10?gfx_drawstr("A"):lo==11?gfx_drawstr("B"):lo==12?gfx_drawstr("C"):lo==13?gfx_drawstr("D"):lo==14?gfx_drawstr("E"):gfx_drawstr("F"));
+);
+
+// ── TITLE ────────────────────────────────────────────────
+draw_box(0,0,gfx_w,26, 0.1,0.28,0.42);
+gfx_setfont(1,"Arial",14,'b');
+gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
+gfx_x=10;gfx_y=5;
+gfx_drawstr("MIDI 4 Channel Router  v2.1");
+
+// ── FOUR SLOT PANELS ─────────────────────────────────────
+py=32; ph=124; gap=6;
+pw=(gfx_w - 10 - gap*3) / 4;
+
+function slot_colors(sidx) (
+  sidx==0 ? (sbgir=0.07;sbgig=0.22;sbgib=0.32; sbgar=0.04;sbgag=0.18;sbgab=0.28; stir=0.28;stig=0.62;stib=0.8; star=0.35;stag=0.88;stab=1;):
+  sidx==1 ? (sbgir=0.26;sbgig=0.14;sbgib=0.03; sbgar=0.22;sbgag=0.11;sbgab=0.02; stir=0.65;stig=0.42;stib=0.12; star=1;stag=0.75;stab=0.18;):
+  sidx==2 ? (sbgir=0.18;sbgig=0.05;sbgib=0.24; sbgar=0.14;sbgag=0.03;sbgab=0.2;  stir=0.52;stig=0.22;stib=0.65; star=0.85;stag=0.4;stab=1;):
+            (sbgir=0.25;sbgig=0.05;sbgib=0.12; sbgar=0.2; sbgag=0.03;sbgab=0.09; stir=0.65;stig=0.24;stib=0.4;  star=1;stag=0.42;stab=0.65;);
+);
+
+function draw_slot(cpx, cpy, cpw, cph, sidx, s_en, s_in, s_out,
+                   last_note, last_vel, active, routed) (
+  slot_colors(sidx);
+
+  active?(draw_box(cpx,cpy,cpw,cph,sbgar,sbgag,sbgab);gfx_r=star;gfx_g=stag;gfx_b=stab;):
+         (draw_box(cpx,cpy,cpw,cph,sbgir,sbgig,sbgib);gfx_r=stir;gfx_g=stig;gfx_b=stib;);
+  gfx_a=1;
+
+  // title
+  gfx_setfont(1,"Arial",10,'b');
+  gfx_x=cpx+5;gfx_y=cpy+5;
+  gfx_drawstr("SLOT "); gfx_drawnumber(sidx+1,0);
+
+  // enable badge
+  s_en?(draw_box(cpx+cpw-40,cpy+4,38,14,0.04,0.22,0.08);gfx_r=0.28;gfx_g=1;gfx_b=0.44;):
+       (draw_box(cpx+cpw-40,cpy+4,38,14,0.15,0.15,0.2);  gfx_r=0.42;gfx_g=0.42;gfx_b=0.55;);
+  gfx_a=1;gfx_setfont(1,"Arial",8,0);
+  gfx_x=cpx+cpw-36;gfx_y=cpy+7;
+  s_en?gfx_drawstr("ROUTE"):gfx_drawstr("BYPASS");
+
+  // in → out routing display
+  gfx_setfont(1,"Arial",9,0);
+  gfx_x=cpx+5;gfx_y=cpy+24;
+
+  s_en ? (
+    draw_box(cpx+4,cpy+21,26,14, 0.08,0.18,0.28);
+    gfx_r=0.5;gfx_g=0.75;gfx_b=0.95;gfx_a=1;
+    gfx_x=cpx+7;gfx_y=cpy+24;
+    gfx_drawstr("ch"); gfx_drawnumber(s_in+1,0);
+
+    gfx_r=0.28;gfx_g=1;gfx_b=0.44;gfx_a=1;
+    gfx_x=cpx+32;gfx_y=cpy+24;
+    gfx_drawstr("->");
+
+    draw_box(cpx+48,cpy+21,26,14, 0.04,0.22,0.08);
+    gfx_r=0.28;gfx_g=1;gfx_b=0.44;gfx_a=1;
+    gfx_x=cpx+51;gfx_y=cpy+24;
+    gfx_drawstr("ch"); gfx_drawnumber(s_out+1,0);
+  ) : (
+    draw_box(cpx+4,cpy+21,26,14, 0.08,0.18,0.28);
+    gfx_r=0.5;gfx_g=0.75;gfx_b=0.95;gfx_a=1;
+    gfx_x=cpx+7;gfx_y=cpy+24;
+    gfx_drawstr("ch"); gfx_drawnumber(s_in+1,0);
+    gfx_r=0.35;gfx_g=0.35;gfx_b=0.45;gfx_a=1;
+    gfx_x=cpx+32;gfx_y=cpy+24;
+    gfx_drawstr("bypass");
+  );
+
+  // last note large
+  gfx_setfont(1,"Arial",20,'b');
+  gfx_r=active?star:stir; gfx_g=active?stag:stig; gfx_b=active?stab:stib; gfx_a=1;
+  gfx_x=cpx+5;gfx_y=cpy+42;
+  draw_note(last_note);
+
+  // note number
+  gfx_setfont(1,"Arial",10,0);
+  gfx_r=(active?star:stir)*0.82; gfx_g=(active?stag:stig)*0.82; gfx_b=(active?stab:stib)*0.82; gfx_a=1;
+  gfx_x=cpx+5;gfx_y=cpy+70;
+  last_note>=0?(gfx_drawstr("#");gfx_drawnumber(last_note,0);):gfx_drawstr("#--");
+
+  // vel
+  gfx_setfont(1,"Arial",9,0);
+  gfx_r=(active?star:stir)*0.72; gfx_g=(active?stag:stig)*0.72; gfx_b=(active?stab:stib)*0.72; gfx_a=1;
+  gfx_x=cpx+5;gfx_y=cpy+86;
+  gfx_drawstr("vel:"); last_note>=0?gfx_drawnumber(last_vel,0):gfx_drawstr("--");
+
+  // routed count
+  gfx_x=cpx+5;gfx_y=cpy+100;
+  gfx_drawstr("rte:"); gfx_drawnumber(routed,0);
+
+  // status
+  active?(gfx_r=0.22;gfx_g=0.9;gfx_b=0.45;):(gfx_r=(active?star:stir)*0.7;gfx_g=(active?stag:stig)*0.7;gfx_b=(active?stab:stib)*0.7;);
+  gfx_a=1;
+  gfx_x=cpx+5;gfx_y=cpy+114;
+  gfx_drawstr(active?"* ON":"o off");
+);
+
+draw_slot(5,            py, pw, ph, 0, en1, in1, out1, s1_last_note, s1_last_vel, s1_active, s1_routed);
+draw_slot(5+pw+gap,     py, pw, ph, 1, en2, in2, out2, s2_last_note, s2_last_vel, s2_active, s2_routed);
+draw_slot(5+pw*2+gap*2, py, pw, ph, 2, en3, in3, out3, s3_last_note, s3_last_vel, s3_active, s3_routed);
+draw_slot(5+pw*3+gap*3, py, pw, ph, 3, en4, in4, out4, s4_last_note, s4_last_vel, s4_active, s4_routed);
+
+// ── ROUTING SUMMARY BAR ──────────────────────────────────
+sby=py+ph+6;
+draw_box(0,sby,gfx_w,18, 0.06,0.06,0.12);
+gfx_setfont(1,"Arial",9,0);
+
+sw=gfx_w/4;
+si=0;
+loop(4,
+  en  = si==0?en1 :si==1?en2 :si==2?en3 :en4;
+  inc = si==0?in1 :si==1?in2 :si==2?in3 :in4;
+  ouc = si==0?out1:si==1?out2:si==2?out3:out4;
+
+  si==0?(gfx_r=0.35;gfx_g=0.85;gfx_b=1;):
+  si==1?(gfx_r=1;   gfx_g=0.72;gfx_b=0.18;):
+  si==2?(gfx_r=0.85;gfx_g=0.4; gfx_b=1;):
+        (gfx_r=1;   gfx_g=0.42;gfx_b=0.65;);
+  gfx_a=1;
+  gfx_x=si*sw+8;gfx_y=sby+4;
+  gfx_drawstr("S"); gfx_drawnumber(si+1,0);
+  en ? (
+    gfx_r=0.5;gfx_g=0.55;gfx_b=0.65;gfx_a=1;
+    gfx_drawstr(" ch");gfx_drawnumber(inc+1,0);
+    gfx_r=0.25;gfx_g=1;gfx_b=0.42;gfx_a=1;
+    gfx_drawstr("->");gfx_drawnumber(ouc+1,0);
+  ) : (
+    gfx_r=0.32;gfx_g=0.32;gfx_b=0.42;gfx_a=1;
+    gfx_drawstr(" bypass");
+  );
+  si+=1;
+);
+
+// ── MIDI LOG TABLE ───────────────────────────────────────
+log_top=sby+22;
+draw_box(0,log_top,gfx_w,16, 0.07,0.07,0.18);
+gfx_setfont(1,"Arial",9,'b');
+gfx_r=0.5;gfx_g=0.6;gfx_b=1;gfx_a=1;
+
+lx_dir=6; lx_st=48; lx_ich=98; lx_och=132; lx_note=168; lx_vel=248; lx_int=282;
+
+gfx_x=lx_dir; gfx_y=log_top+3; gfx_drawstr("DIR");
+gfx_x=lx_st;  gfx_y=log_top+3; gfx_drawstr("STATUS");
+gfx_x=lx_ich; gfx_y=log_top+3; gfx_drawstr("IN CH");
+gfx_x=lx_och; gfx_y=log_top+3; gfx_drawstr("OUT CH");
+gfx_x=lx_note;gfx_y=log_top+3; gfx_drawstr("NOTE");
+gfx_x=lx_vel; gfx_y=log_top+3; gfx_drawstr("VEL");
+gfx_x=lx_int; gfx_y=log_top+3; gfx_drawstr("INTERPRETATION");
+
+row_h=22;
+ri=0;
+loop(LOG_SIZE,
+  entry=(log_head-1-ri+LOG_SIZE)%LOG_SIZE;
+  base=LOG_BASE+entry*LOG_FIELDS;
+  ldir=base[0]; lstatus=base[1]; linch=base[2]; loutch=base[3]; lnote=base[4]; lvel=base[5];
+  ry=log_top+18+ri*row_h;
+
+  ri%2==0?draw_box(0,ry,gfx_w,row_h-1,0.06,0.06,0.11):
+          draw_box(0,ry,gfx_w,row_h-1,0.04,0.04,0.09);
+
+  lstatus>0 ? (
+    gfx_setfont(1,"Arial",9,0);
+
+    // DIR badge
+    ldir==0?(
+      draw_box(lx_dir,ry+3,34,15,0.04,0.18,0.1);
+      gfx_r=0.3;gfx_g=1;gfx_b=0.5;gfx_x=lx_dir+5;gfx_y=ry+6;gfx_drawstr(" IN");
+    ):(
+      draw_box(lx_dir,ry+3,34,15,0.22,0.12,0.04);
+      gfx_r=1;gfx_g=0.62;gfx_b=0.18;gfx_x=lx_dir+3;gfx_y=ry+6;gfx_drawstr("OUT");
+    );
+    gfx_a=1;
+
+    // STATUS
+    gfx_r=0.5;gfx_g=0.6;gfx_b=0.85;gfx_a=1;
+    gfx_x=lx_st;gfx_y=ry+6;
+    draw_hex(lstatus&0xF0); gfx_drawstr(" ");
+    (lstatus&0xF0)==0x90?gfx_drawstr("NOn") :
+    (lstatus&0xF0)==0x80?gfx_drawstr("NOff"):
+    (lstatus&0xF0)==0xA0?gfx_drawstr("AT")  :
+    (lstatus&0xF0)==0xB0?gfx_drawstr("CC")  :gfx_drawstr("??");
+
+    // IN CH
+    gfx_r=0.5;gfx_g=0.6;gfx_b=0.78;gfx_a=1;
+    gfx_x=lx_ich;gfx_y=ry+6;gfx_drawnumber(linch+1,0);
+
+    // OUT CH
+    loutch>=0?(gfx_r=0.32;gfx_g=1;gfx_b=0.44;):(gfx_r=0.35;gfx_g=0.35;gfx_b=0.45;);
+    gfx_a=1;gfx_x=lx_och;gfx_y=ry+6;
+    loutch>=0?gfx_drawnumber(loutch+1,0):gfx_drawstr("-");
+
+    // NOTE
+    ldir==0?(gfx_r=0.4;gfx_g=0.88;gfx_b=1;):(gfx_r=1;gfx_g=0.62;gfx_b=0.2;);
+    gfx_a=1;gfx_x=lx_note;gfx_y=ry+6;
+    draw_note(lnote);gfx_drawstr("(");gfx_drawnumber(lnote,0);gfx_drawstr(")");
+
+    // VEL
+    gfx_r=0.5;gfx_g=0.5;gfx_b=0.62;gfx_a=1;
+    gfx_x=lx_vel;gfx_y=ry+6;gfx_drawnumber(lvel,0);
+
+    // INTERPRETATION
+    gfx_x=lx_int;gfx_y=ry+6;
+    loutch>=0&&ldir==0?(gfx_r=0.4; gfx_g=0.88;gfx_b=1;    gfx_drawstr("ch");gfx_drawnumber(linch+1,0);gfx_drawstr(" -> route to ch");gfx_drawnumber(loutch+1,0)):
+    loutch>=0&&ldir==1?(gfx_r=0.32;gfx_g=1;   gfx_b=0.44; gfx_drawstr("-> out ch");gfx_drawnumber(loutch+1,0)):
+    loutch<0 &&ldir==0?(gfx_r=0.45;gfx_g=0.45;gfx_b=0.55; gfx_drawstr("ch");gfx_drawnumber(linch+1,0);gfx_drawstr(" no match -> in")):
+    loutch<0 &&ldir==1?(gfx_r=0.38;gfx_g=0.38;gfx_b=0.5;  gfx_drawstr("-> forwarded unchanged")):
+                       (gfx_r=0.32;gfx_g=0.32;gfx_b=0.38; gfx_drawstr("-"));
+    gfx_a=1;
+  );
+  ri+=1;
+);
+
+gfx_setfont(1,"Arial",8,0);
+gfx_r=0.28;gfx_g=0.28;gfx_b=0.38;gfx_a=1;
+gfx_x=gfx_w-46;gfx_y=log_top+20;gfx_drawstr("newest");
+gfx_x=gfx_w-44;gfx_y=log_top+18+row_h*(LOG_SIZE-1);gfx_drawstr("oldest");
