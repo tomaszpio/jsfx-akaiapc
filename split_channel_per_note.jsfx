@@ -1,38 +1,44 @@
 desc: MIDI Dual Region Filter
 author: tomaszpio
-version: 2.3.0
+version: 2.5.0
 about:
-  Two independent note regions, each with its own input channel and note range.
-  Accepted notes are routed to a single output channel.
-  Notes in range but on wrong channel are blocked (Note On and Note Off).
-  Note Off for tracked note on wrong channel is blocked - note stays active.
-  Notes outside both regions are blocked entirely.
+  Two independent note regions, each with its own input channel, note range,
+  and pitch shift (semitones). Accepted notes are routed to a single output
+  channel with the shift applied. Out-of-range notes are blocked.
   Overlap behaviour is configurable via slider.
+  v2.5.0: fixed stuck notes on slider change, fixed last_note ghost display,
+           fixed overlap Note Off double-block counter increment.
 
 slider1:1<1,16,1>Region A — Input channel
 slider2:36<0,127,1>Region A — Low note
 slider3:60<0,127,1>Region A — High note
-slider4:2<1,16,1>Region B — Input channel
-slider5:48<0,127,1>Region B — Low note
-slider6:84<0,127,1>Region B — High note
-slider7:1<1,16,1>Output channel
-slider8:0<0,2,1{Both regions,Region A priority,Region B priority}>Overlap mode
-slider9:0<0,1,1{Pass,Block}>Other MIDI
+slider4:0<-127,127,1>Region A — Pitch shift (semitones)
+slider5:2<1,16,1>Region B — Input channel
+slider6:48<0,127,1>Region B — Low note
+slider7:84<0,127,1>Region B — High note
+slider8:0<-127,127,1>Region B — Pitch shift (semitones)
+slider9:1<1,16,1>Output channel
+slider10:0<0,2,1{Both regions,Region A priority,Region B priority}>Overlap mode
+slider11:0<0,1,1{Pass,Block}>Other MIDI
 
 in_pin:none
 out_pin:none
 
 @init
-note_region = 400;
-memset(note_region, 0, 128);
+// note_region[n]: 0=inactive, 1=tracked from A, 2=tracked from B, 3=overlap
+// note_shifted[n]: the actual note number we sent out (after pitch shift)
+note_region  = 400;
+note_shifted = 530;   // 128 slots, no overlap with note_region
+memset(note_region,  0, 128);
+memset(note_shifted, 0, 128);
 
-a_last_note = -1; a_last_vel = 0; a_active = 0; a_blocked = 0;
-b_last_note = -1; b_last_vel = 0; b_active = 0; b_blocked = 0;
-out_last_note = -1; out_last_vel = 0; out_active = 0;
+a_last_note=-1; a_last_vel=0; a_active=0; a_blocked=0; a_shift=0;
+b_last_note=-1; b_last_vel=0; b_active=0; b_blocked=0; b_shift=0;
+out_last_note=-1; out_last_vel=0; out_active=0;
 
 LOG_SIZE   = 10;
-LOG_FIELDS = 5;
-LOG_BASE   = 600;
+LOG_FIELDS = 6;
+LOG_BASE   = 660;
 log_head   = 0;
 log_count  = 0;
 
@@ -40,27 +46,52 @@ log_count  = 0;
 // 0=A accepted, 1=B accepted, 2=wrong ch blocked A, 3=wrong ch blocked B
 // 4=passthru, 5=NoteOff, 6=both/overlap, 7=outside all regions
 
-function log_push(ldir, lstatus, lnote, lvel, linterp) local(base) (
+function log_push(ldir, lstatus, lnote, lvel, linterp, lshifted) local(base) (
   base = LOG_BASE + log_head * LOG_FIELDS;
   base[0] = ldir;
   base[1] = lstatus;
   base[2] = lnote;
   base[3] = lvel;
   base[4] = linterp;
+  base[5] = lshifted;
   log_head = (log_head + 1) % LOG_SIZE;
   log_count < LOG_SIZE ? log_count += 1;
 );
 
+function clamp_note(n) (
+  n < 0 ? 0 : n > 127 ? 127 : n;
+);
+
 @slider
+// ── BUG FIX: flush all tracked notes before reconfiguring ────────────────────
+// If out_ch (or any region param) changes while notes are held, the Note Off
+// would be sent to the NEW out_ch while the Note On went to the OLD one.
+// We must send Note Off on the CURRENT (old) out_ch for every live note before
+// updating any variables.
+n_flush = 0;
+loop(128,
+  note_region[n_flush] > 0 ? (
+    midisend(0, 0x80 | out_ch, note_shifted[n_flush]);
+    note_region[n_flush]  = 0;
+    note_shifted[n_flush] = 0;
+  );
+  n_flush += 1;
+);
+a_active=0; a_last_note=-1;
+b_active=0; b_last_note=-1;
+out_active=0; out_last_note=-1;
+
 a_in_ch  = (slider1|0) - 1;
 a_low    = slider2|0;
 a_high   = slider3|0;
-b_in_ch  = (slider4|0) - 1;
-b_low    = slider5|0;
-b_high   = slider6|0;
-out_ch   = (slider7|0) - 1;
-ovl_mode = slider8|0;
-other    = slider9|0;
+a_shift  = slider4|0;
+b_in_ch  = (slider5|0) - 1;
+b_low    = slider6|0;
+b_high   = slider7|0;
+b_shift  = slider8|0;
+out_ch   = (slider9|0) - 1;
+ovl_mode = slider10|0;
+other    = slider11|0;
 
 a_low > a_high ? (tmp=a_low; a_low=a_high; a_high=tmp;);
 b_low > b_high ? (tmp=b_low; b_low=b_high; b_high=tmp;);
@@ -87,113 +118,126 @@ while (midirecv(offset, msg1, msg23)) (
   is_note_on ? (
 
     in_A && in_B ? (
-      log_push(0, status | in_ch, note, vel, 6);
+      log_push(0, status | in_ch, note, vel, 6, note);
       ovl_mode == 0 ? (
-        midisend(offset, 0x90 | out_ch, note | (vel << 8));
-        midisend(offset, 0x90 | out_ch, note | (vel << 8));
-        note_region[note] = 3;
-        log_push(1, 0x90 | out_ch, note, vel, 6);
+        shifted_A = clamp_note(note + a_shift);
+        midisend(offset, 0x90 | out_ch, shifted_A | (vel << 8));
+        note_region[note]  = 3;
+        note_shifted[note] = shifted_A;
+        log_push(1, 0x90 | out_ch, note, vel, 6, shifted_A);
         a_last_note=note; a_last_vel=vel; a_active=1;
         b_last_note=note; b_last_vel=vel; b_active=1;
-        out_last_note=note; out_last_vel=vel; out_active=1;
+        out_last_note=shifted_A; out_last_vel=vel; out_active=1;
       ) : ovl_mode == 1 ? (
-        midisend(offset, 0x90 | out_ch, note | (vel << 8));
-        note_region[note] = 1;
-        log_push(1, 0x90 | out_ch, note, vel, 0);
+        shifted_A = clamp_note(note + a_shift);
+        midisend(offset, 0x90 | out_ch, shifted_A | (vel << 8));
+        note_region[note]  = 1;
+        note_shifted[note] = shifted_A;
+        log_push(1, 0x90 | out_ch, note, vel, 0, shifted_A);
         a_last_note=note; a_last_vel=vel; a_active=1;
-        out_last_note=note; out_last_vel=vel; out_active=1;
+        out_last_note=shifted_A; out_last_vel=vel; out_active=1;
       ) : (
-        midisend(offset, 0x90 | out_ch, note | (vel << 8));
-        note_region[note] = 2;
-        log_push(1, 0x90 | out_ch, note, vel, 1);
+        shifted_B = clamp_note(note + b_shift);
+        midisend(offset, 0x90 | out_ch, shifted_B | (vel << 8));
+        note_region[note]  = 2;
+        note_shifted[note] = shifted_B;
+        log_push(1, 0x90 | out_ch, note, vel, 1, shifted_B);
         b_last_note=note; b_last_vel=vel; b_active=1;
-        out_last_note=note; out_last_vel=vel; out_active=1;
+        out_last_note=shifted_B; out_last_vel=vel; out_active=1;
       );
     ) : in_A ? (
-      log_push(0, status | in_ch, note, vel, 0);
-      midisend(offset, 0x90 | out_ch, note | (vel << 8));
-      note_region[note] = 1;
-      log_push(1, 0x90 | out_ch, note, vel, 0);
+      shifted_A = clamp_note(note + a_shift);
+      log_push(0, status | in_ch, note, vel, 0, shifted_A);
+      midisend(offset, 0x90 | out_ch, shifted_A | (vel << 8));
+      note_region[note]  = 1;
+      note_shifted[note] = shifted_A;
+      log_push(1, 0x90 | out_ch, note, vel, 0, shifted_A);
       a_last_note=note; a_last_vel=vel; a_active=1;
-      out_last_note=note; out_last_vel=vel; out_active=1;
+      out_last_note=shifted_A; out_last_vel=vel; out_active=1;
     ) : in_B ? (
-      log_push(0, status | in_ch, note, vel, 1);
-      midisend(offset, 0x90 | out_ch, note | (vel << 8));
-      note_region[note] = 2;
-      log_push(1, 0x90 | out_ch, note, vel, 1);
+      shifted_B = clamp_note(note + b_shift);
+      log_push(0, status | in_ch, note, vel, 1, shifted_B);
+      midisend(offset, 0x90 | out_ch, shifted_B | (vel << 8));
+      note_region[note]  = 2;
+      note_shifted[note] = shifted_B;
+      log_push(1, 0x90 | out_ch, note, vel, 1, shifted_B);
       b_last_note=note; b_last_vel=vel; b_active=1;
-      out_last_note=note; out_last_vel=vel; out_active=1;
+      out_last_note=shifted_B; out_last_vel=vel; out_active=1;
     ) : blocked_A ? (
-      log_push(0, status | in_ch, note, vel, 2);
+      log_push(0, status | in_ch, note, vel, 2, note);
       a_blocked += 1;
     ) : blocked_B ? (
-      log_push(0, status | in_ch, note, vel, 3);
+      log_push(0, status | in_ch, note, vel, 3, note);
       b_blocked += 1;
     ) : (
-      log_push(0, status | in_ch, note, vel, 7);
+      log_push(0, status | in_ch, note, vel, 7, note);
     );
 
   ) : is_note_off ? (
 
     note_region[note] > 0 ? (
-      // nota tracked — sprawdzamy kanał
+      // Use the stored shifted note for the Note Off
+      shifted_out = note_shifted[note];
       note_region[note] == 1 ? (
         in_ch == a_in_ch ? (
-          midisend(offset, 0x80 | out_ch, note);
-          log_push(0, status | in_ch, note, vel, 5);
-          log_push(1, 0x80 | out_ch, note, 0, 5);
-          a_active = 0; out_active = 0;
-          note_region[note] = 0;
+          midisend(offset, 0x80 | out_ch, shifted_out);
+          log_push(0, status | in_ch, note, vel, 5, shifted_out);
+          log_push(1, 0x80 | out_ch, note, 0, 5, shifted_out);
+          // ── BUG FIX: reset display state to --- on Note Off ─────────────
+          a_active=0; a_last_note=-1;
+          out_active=0; out_last_note=-1;
+          note_region[note]=0; note_shifted[note]=0;
         ) : (
-          // zły kanał → blokujemy, nuta zostaje aktywna
-          log_push(0, status | in_ch, note, vel, 2);
+          log_push(0, status | in_ch, note, vel, 2, note);
           a_blocked += 1;
         );
       ) : note_region[note] == 2 ? (
         in_ch == b_in_ch ? (
-          midisend(offset, 0x80 | out_ch, note);
-          log_push(0, status | in_ch, note, vel, 5);
-          log_push(1, 0x80 | out_ch, note, 0, 5);
-          b_active = 0; out_active = 0;
-          note_region[note] = 0;
+          midisend(offset, 0x80 | out_ch, shifted_out);
+          log_push(0, status | in_ch, note, vel, 5, shifted_out);
+          log_push(1, 0x80 | out_ch, note, 0, 5, shifted_out);
+          // ── BUG FIX: reset display state to --- on Note Off ─────────────
+          b_active=0; b_last_note=-1;
+          out_active=0; out_last_note=-1;
+          note_region[note]=0; note_shifted[note]=0;
         ) : (
-          log_push(0, status | in_ch, note, vel, 3);
+          log_push(0, status | in_ch, note, vel, 3, note);
           b_blocked += 1;
         );
       ) : note_region[note] == 3 ? (
-        // overlap — akceptujemy kanał A lub B
         in_ch == a_in_ch || in_ch == b_in_ch ? (
-          midisend(offset, 0x80 | out_ch, note);
-          log_push(0, status | in_ch, note, vel, 5);
-          log_push(1, 0x80 | out_ch, note, 0, 5);
-          a_active = 0; b_active = 0; out_active = 0;
-          note_region[note] = 0;
-        ) : (
-          log_push(0, status | in_ch, note, vel, 2);
-          a_blocked += 1;
+          midisend(offset, 0x80 | out_ch, shifted_out);
+          log_push(0, status | in_ch, note, vel, 5, shifted_out);
+          log_push(1, 0x80 | out_ch, note, 0, 5, shifted_out);
+          // ── BUG FIX: reset display state to --- on Note Off ─────────────
+          a_active=0; a_last_note=-1;
+          b_active=0; b_last_note=-1;
+          out_active=0; out_last_note=-1;
+          note_region[note]=0; note_shifted[note]=0;
         );
+        // ── BUG FIX: overlap region — second Note Off (from other channel)
+        // is silently ignored instead of being misclassified as blocked_A/B
+        // (note_region[note] is now 0, so the outer `> 0` guard handles it)
       );
     ) : blocked_A ? (
-      // nota nie tracked, zakres A ale zły kanał
-      log_push(0, status | in_ch, note, vel, 2);
+      log_push(0, status | in_ch, note, vel, 2, note);
       a_blocked += 1;
     ) : blocked_B ? (
-      log_push(0, status | in_ch, note, vel, 3);
+      log_push(0, status | in_ch, note, vel, 3, note);
       b_blocked += 1;
     );
-    // poza zakresami → cicho ignorujemy
 
   ) : (
-    // non-note messages
-    log_push(0, status | in_ch, note, vel, 4);
+    log_push(0, status | in_ch, note, vel, 4, note);
     other == 0 ? (
       midisend(offset, msg1, msg23);
-      log_push(1, msg1, note, vel, 4);
+      log_push(1, msg1, note, vel, 4, note);
     );
   );
 );
 
-@gfx 580 620
+@gfx 620 660
+
 gfx_clear = 0x0c0c18;
 
 function draw_box(x,y,w,h,r,g,b) (
@@ -206,10 +250,10 @@ function draw_note(n) (
     gfx_drawstr("---");
   ) : (
     oct=(n/12)|0; nn=n%12;
-    nn==0?gfx_drawstr("C"):nn==1?gfx_drawstr("C#"):nn==2?gfx_drawstr("D"):
-    nn==3?gfx_drawstr("D#"):nn==4?gfx_drawstr("E"):nn==5?gfx_drawstr("F"):
-    nn==6?gfx_drawstr("F#"):nn==7?gfx_drawstr("G"):nn==8?gfx_drawstr("G#"):
-    nn==9?gfx_drawstr("A"):nn==10?gfx_drawstr("A#"):gfx_drawstr("B");
+    nn==0?gfx_drawstr("C") :nn==1?gfx_drawstr("C#"):nn==2?gfx_drawstr("D") :
+    nn==3?gfx_drawstr("D#"):nn==4?gfx_drawstr("E") :nn==5?gfx_drawstr("F") :
+    nn==6?gfx_drawstr("F#"):nn==7?gfx_drawstr("G") :nn==8?gfx_drawstr("G#"):
+    nn==9?gfx_drawstr("A") :nn==10?gfx_drawstr("A#"):gfx_drawstr("B");
     gfx_drawnumber(oct-1,0);
   );
 );
@@ -221,12 +265,26 @@ function draw_hex(val) local(hi,lo) (
   lo<10?gfx_drawnumber(lo,0):(lo==10?gfx_drawstr("A"):lo==11?gfx_drawstr("B"):lo==12?gfx_drawstr("C"):lo==13?gfx_drawstr("D"):lo==14?gfx_drawstr("E"):gfx_drawstr("F"));
 );
 
+function draw_shift_badge(x, y, shift_val, accent_r, accent_g, accent_b) (
+  gfx_setfont(1,"Arial",9,'b');
+  shift_val == 0 ? (
+    gfx_r=0.32; gfx_g=0.32; gfx_b=0.42; gfx_a=1;
+    gfx_x=x; gfx_y=y; gfx_drawstr("shift: 0");
+  ) : (
+    gfx_r=accent_r; gfx_g=accent_g; gfx_b=accent_b; gfx_a=1;
+    gfx_x=x; gfx_y=y;
+    gfx_drawstr("shift:");
+    shift_val > 0 ? gfx_drawstr("+");
+    gfx_drawnumber(shift_val, 0);
+  );
+);
+
 // ── TITLE ────────────────────────────────────────────────
 draw_box(0,0,gfx_w,26, 0.1,0.22,0.5);
 gfx_setfont(1,"Arial",14,'b');
 gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
 gfx_x=10;gfx_y=5;
-gfx_drawstr("MIDI Dual Region Filter  v2.3");
+gfx_drawstr("MIDI Dual Region Filter  v2.5");
 
 // ── DUAL RANGE BAR ───────────────────────────────────────
 ky=32; kh=22; kx=10; kw=gfx_w-20;
@@ -241,8 +299,7 @@ bx1=(kx + b_low/127.0*kw)|0;
 bx2=(kx + b_high/127.0*kw)|0;
 draw_box(bx1,ky+kh/2, bx2-bx1,kh/2, 0.5,0.15,0.55);
 
-ol1 = ax1>bx1?ax1:bx1;
-ol2 = ax2<bx2?ax2:bx2;
+ol1=ax1>bx1?ax1:bx1; ol2=ax2<bx2?ax2:bx2;
 ol1 < ol2 ? (
   gfx_r=1;gfx_g=0.85;gfx_b=0.1;gfx_a=0.45;
   gfx_rect(ol1,ky,ol2-ol1,kh);
@@ -275,10 +332,10 @@ other==0?(gfx_r=0.4;gfx_g=0.8;gfx_b=0.4;gfx_drawstr("PASS")):
          (gfx_r=1;  gfx_g=0.3;gfx_b=0.3;gfx_drawstr("BLOCK"));
 
 // ── THREE STATUS PANELS ──────────────────────────────────
-py=ky+kh+30; pw=(gfx_w-40)/3; ph=120; gap=10;
+py=ky+kh+30; pw=(gfx_w-40)/3; ph=138; gap=10;
 px0=10; px1=px0+pw+gap; px2=px1+pw+gap;
 
-// REGION A
+// ── REGION A panel ───────────────────────────────────────
 a_active?(draw_box(px0,py,pw,ph,0.04,0.2,0.36); gfx_r=0.4; gfx_g=0.85;gfx_b=1;):
          (draw_box(px0,py,pw,ph,0.07,0.09,0.13);gfx_r=0.28;gfx_g=0.45;gfx_b=0.58;);
 gfx_a=1; gfx_setfont(1,"Arial",11,'b');
@@ -300,8 +357,9 @@ gfx_r=1;gfx_g=0.38;gfx_b=0.38;gfx_a=1;
 gfx_x=px0+6;gfx_y=py+92; gfx_drawstr("blk:"); gfx_drawnumber(a_blocked,0);
 a_active?(gfx_r=0.3;gfx_g=1;gfx_b=0.5;):(gfx_r=0.3;gfx_g=0.4;gfx_b=0.5;);
 gfx_x=px0+6;gfx_y=py+106; gfx_drawstr(a_active?"* ACTIVE":"o idle");
+draw_shift_badge(px0+6, py+120, a_shift, 0.45, 0.9, 1.0);
 
-// REGION B
+// ── REGION B panel ───────────────────────────────────────
 b_active?(draw_box(px1,py,pw,ph,0.25,0.07,0.3); gfx_r=0.88;gfx_g=0.5;gfx_b=1;):
          (draw_box(px1,py,pw,ph,0.09,0.07,0.13);gfx_r=0.5; gfx_g=0.32;gfx_b=0.58;);
 gfx_a=1; gfx_setfont(1,"Arial",11,'b');
@@ -323,8 +381,9 @@ gfx_r=1;gfx_g=0.38;gfx_b=0.38;gfx_a=1;
 gfx_x=px1+6;gfx_y=py+92; gfx_drawstr("blk:"); gfx_drawnumber(b_blocked,0);
 b_active?(gfx_r=0.55;gfx_g=0.3;gfx_b=1;):(gfx_r=0.4;gfx_g=0.3;gfx_b=0.5;);
 gfx_x=px1+6;gfx_y=py+106; gfx_drawstr(b_active?"* ACTIVE":"o idle");
+draw_shift_badge(px1+6, py+120, b_shift, 0.88, 0.55, 1.0);
 
-// OUT
+// ── OUT panel ────────────────────────────────────────────
 out_active?(draw_box(px2,py,pw,ph,0.06,0.25,0.08);gfx_r=0.35;gfx_g=1;  gfx_b=0.42;):
            (draw_box(px2,py,pw,ph,0.07,0.11,0.07);gfx_r=0.3; gfx_g=0.5;gfx_b=0.33;);
 gfx_a=1; gfx_setfont(1,"Arial",11,'b');
@@ -343,6 +402,9 @@ gfx_x=px2+6;gfx_y=py+78; gfx_drawstr("vel:");
 out_last_note>=0?gfx_drawnumber(out_last_vel,0):gfx_drawstr("--");
 out_active?(gfx_r=0.3;gfx_g=1;gfx_b=0.45;):(gfx_r=0.28;gfx_g=0.45;gfx_b=0.32;);
 gfx_x=px2+6;gfx_y=py+106; gfx_drawstr(out_active?"* ACTIVE":"o idle");
+gfx_setfont(1,"Arial",9,0);
+gfx_r=0.28;gfx_g=0.55;gfx_b=0.35;gfx_a=1;
+gfx_x=px2+6;gfx_y=py+120; gfx_drawstr("(shifted output)");
 
 // ── MIDI LOG TABLE ───────────────────────────────────────
 log_top = py+ph+10;
@@ -350,23 +412,23 @@ draw_box(0,log_top,gfx_w,16, 0.07,0.07,0.18);
 gfx_setfont(1,"Arial",9,'b');
 gfx_r=0.5;gfx_g=0.6;gfx_b=1;gfx_a=1;
 
-lx_dir=6; lx_st=48; lx_ch=100; lx_note=128; lx_vel=200; lx_int=238;
+lx_dir=6; lx_st=48; lx_ch=100; lx_note=128; lx_vel=258; lx_int=295;
 
-gfx_x=lx_dir; gfx_y=log_top+3; gfx_drawstr("DIR");
-gfx_x=lx_st;  gfx_y=log_top+3; gfx_drawstr("STATUS");
-gfx_x=lx_ch;  gfx_y=log_top+3; gfx_drawstr("CH");
-gfx_x=lx_note;gfx_y=log_top+3; gfx_drawstr("NOTE");
-gfx_x=lx_vel; gfx_y=log_top+3; gfx_drawstr("VEL");
-gfx_x=lx_int; gfx_y=log_top+3; gfx_drawstr("INTERPRETATION");
+gfx_x=lx_dir;  gfx_y=log_top+3; gfx_drawstr("DIR");
+gfx_x=lx_st;   gfx_y=log_top+3; gfx_drawstr("STATUS");
+gfx_x=lx_ch;   gfx_y=log_top+3; gfx_drawstr("CH");
+gfx_x=lx_note; gfx_y=log_top+3; gfx_drawstr("NOTE -> SHIFTED");
+gfx_x=lx_vel;  gfx_y=log_top+3; gfx_drawstr("VEL");
+gfx_x=lx_int;  gfx_y=log_top+3; gfx_drawstr("INTERPRETATION");
 
 row_h=22;
 ri=0;
 loop(LOG_SIZE,
   entry=(log_head-1-ri+LOG_SIZE)%LOG_SIZE;
   base=LOG_BASE+entry*LOG_FIELDS;
-  ldir=base[0]; lstatus=base[1]; lnote=base[2]; lvel=base[3]; linterp=base[4];
-  ry=log_top+18+ri*row_h;
+  ldir=base[0]; lstatus=base[1]; lnote=base[2]; lvel=base[3]; linterp=base[4]; lshifted=base[5];
 
+  ry=log_top+18+ri*row_h;
   ri%2==0?draw_box(0,ry,gfx_w,row_h-1,0.06,0.06,0.11):
           draw_box(0,ry,gfx_w,row_h-1,0.04,0.04,0.09);
 
@@ -383,7 +445,7 @@ loop(LOG_SIZE,
     );
     gfx_a=1;
 
-    // STATUS
+    // STATUS byte
     gfx_r=0.5;gfx_g=0.6;gfx_b=0.85;gfx_a=1;
     gfx_x=lx_st;gfx_y=ry+6;
     draw_hex(lstatus&0xF0); gfx_drawstr(" ");
@@ -396,12 +458,19 @@ loop(LOG_SIZE,
     gfx_r=0.55;gfx_g=0.55;gfx_b=0.7;gfx_a=1;
     gfx_x=lx_ch;gfx_y=ry+6;gfx_drawnumber((lstatus&0x0F)+1,0);
 
-    // NOTE
+    // NOTE -> SHIFTED
     linterp==2||linterp==3||linterp==7?(gfx_r=0.35;gfx_g=0.3;gfx_b=0.3;):
     ldir==0?(gfx_r=0.4;gfx_g=0.88;gfx_b=1;):
             (gfx_r=1;  gfx_g=0.62;gfx_b=0.2;);
     gfx_a=1; gfx_x=lx_note;gfx_y=ry+6;
     draw_note(lnote); gfx_drawstr("("); gfx_drawnumber(lnote,0); gfx_drawstr(")");
+
+    lshifted != lnote && (ldir==1 || (linterp<=1 || linterp==6)) ? (
+      gfx_r=0.38;gfx_g=0.38;gfx_b=0.45;gfx_a=1;
+      gfx_drawstr("->");
+      ldir==1?(gfx_r=1;gfx_g=0.75;gfx_b=0.2;gfx_a=1;):(gfx_r=0.6;gfx_g=0.9;gfx_b=0.4;gfx_a=1;);
+      draw_note(lshifted); gfx_drawstr("("); gfx_drawnumber(lshifted,0); gfx_drawstr(")");
+    );
 
     // VEL
     gfx_r=0.5;gfx_g=0.5;gfx_b=0.62;gfx_a=1;
