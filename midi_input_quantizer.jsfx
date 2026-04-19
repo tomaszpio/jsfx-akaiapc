@@ -13,10 +13,11 @@ about:
   Non-note messages pass through unchanged.
 
   Memory layout:
-    100..195  queue      (32 notes * 3 fields)
-    300..811  active     (128 notes * 4 fields: note, ch, pending_off, generation)
-    900..979  CC64 wave  (80 slots)
-    1000..1049 log       (10 entries * 5 fields)
+    100..195  queue        (32 notes * 3 fields)
+    200..327  active_valid (128 note flags: 0=empty, 1=active, 2=queued_pending_off)
+    300..811  active       (128 notes * 4 fields: note, ch, pending_off, generation)
+    900..979  CC64 wave    (80 slots)
+    1000..1049 log         (10 entries * 5 fields)
 
 slider1:0<0,16,1>Channel (0=omni)
 slider2:0<0,3,1{1/1,1/2,1/4,1/8}>Quantize grid
@@ -28,6 +29,9 @@ out_pin:none
 QUEUE_SIZE  = 32;
 QUEUE_BASE  = 100;
 queue_count = 0;
+
+ACTIVE_VALID_BASE = 200;  // 0=empty, 1=active, 2=queued_pending_off
+memset(ACTIVE_VALID_BASE, 0, 128);
 
 ACTIVE_BASE   = 300;
 // 128 notes * 4 fields = 512 slots -> 300..811
@@ -96,17 +100,20 @@ function queue_clear() (
 // active slot: base[0]=note, base[1]=ch, base[2]=pending_off, base[3]=generation
 function active_add(anote, ach) local(base) (
   base = ACTIVE_BASE + anote * 4;
+  ACTIVE_VALID_BASE[anote] != 1 ? active_count += 1;
   base[0] = anote;
   base[1] = ach;
   base[2] = 0;
   base[3] = pedal_generation;
-  active_count += 1;
+  ACTIVE_VALID_BASE[anote] = 1;
 );
 
 function active_mark_off(anote) local(base) (
   base = ACTIVE_BASE + anote * 4;
-  base[0] == anote && base[2] == 0 ? (
-    base[2] = 1;
+  ACTIVE_VALID_BASE[anote] == 1 ? (
+    base[2] == 0 ? base[2] = 1;
+  ) : (
+    ACTIVE_VALID_BASE[anote] = 2;  // note still in queue — mark to release when fired
   );
 );
 
@@ -114,10 +121,11 @@ function flush_pending_offs(ts) local(n, base) (
   n = 0;
   loop(128,
     base = ACTIVE_BASE + n * 4;
-    base[2] == 1 && !cc64_armed ? (  // hold Note Off while pedal is armed
+    ACTIVE_VALID_BASE[n] == 1 && base[2] == 1 && !cc64_armed ? (  // hold Note Off while pedal is armed
       midisend(ts, 0x80 | base[1], base[0]);
       log_push(1, 0x80 | base[1], base[1], base[0], 0);
       base[0] = 0; base[1] = 0; base[2] = 0; base[3] = 0;
+      ACTIVE_VALID_BASE[n] = 0;
       active_count > 0 ? active_count -= 1;
     );
     n += 1;
@@ -129,11 +137,14 @@ function kill_all_active(ts) local(n, base) (
   loop(128,
     base = ACTIVE_BASE + n * 4;
     // only kill notes from previous generation — protects notes played during pedal release
-    (base[0] > 0 || base[1] > 0 || base[2] > 0) && base[3] < pedal_generation ? (
+    ACTIVE_VALID_BASE[n] == 1 && base[3] < pedal_generation ? (
       midisend(ts, 0x80 | base[1], base[0]);
       log_push(1, 0x80 | base[1], base[1], base[0], 0);
       base[0] = 0; base[1] = 0; base[2] = 0; base[3] = 0;
+      ACTIVE_VALID_BASE[n] = 0;
       active_count > 0 ? active_count -= 1;
+    ) : ACTIVE_VALID_BASE[n] == 2 ? (
+      ACTIVE_VALID_BASE[n] = 0;  // queued note cleared by queue_clear() below
     );
     n += 1;
   );
@@ -142,14 +153,19 @@ function kill_all_active(ts) local(n, base) (
   pedal_generation += 1;  // new notes added after this are safe
 );
 
-function flush_queue(ts) local(i, base, anote, avel, ach) (
+function flush_queue(ts) local(i, base, anote, avel, ach, pre_off, abase) (
   i = 0;
   loop(queue_count,
     base = QUEUE_BASE + i * 3;
     anote = base[0]; avel = base[1]; ach = base[2];
+    pre_off = (ACTIVE_VALID_BASE[anote] == 2);
     midisend(ts, 0x90 | ach, anote | (avel << 8));
     log_push(1, 0x90 | ach, ach, anote, avel);
     active_add(anote, ach);
+    pre_off ? (
+      abase = ACTIVE_BASE + anote * 4;
+      abase[2] = 1;
+    );
     last_note_out = anote;
     last_vel_out  = avel;
     fired_count  += 1;
