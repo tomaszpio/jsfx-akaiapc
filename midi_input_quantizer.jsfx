@@ -1,6 +1,6 @@
 desc: MIDI Beat Quantizer
 author: tomaszpio
-version: 1.6.0
+version: 1.7.0
 about:
   Captures incoming MIDI notes and holds them until the next DAW beat.
   On each beat boundary, queued Note Ons are fired.
