@@ -1,6 +1,6 @@
 desc: MIDI Beat Quantizer
 author: tomaszpio
-version: 1.7.0
+version: 1.8.0
 about:
   Captures incoming MIDI notes and holds them until the next DAW beat.
   On each beat boundary, queued Note Ons are fired.
@@ -17,7 +17,7 @@ about:
     200..327   active_valid (128 note flags: 0=empty, 1=active, 2=queued_pending_off)
     400..911   active       (128 notes * 4 fields: note, ch, pending_off, generation)
     1000..1079 CC64 wave    (80 slots)
-    1100..1149 log         (10 entries * 5 fields)
+    1100..1199 log         (20 entries * 5 fields)
 
 slider1:0<0,16,1>Channel (0=omni)
 slider2:0<0,3,1{1/1,1/2,1/4,1/8}>Quantize grid
@@ -52,10 +52,14 @@ last_ch_out   = -1;
 subdiv        = 1.0;
 cc64_kills    = 0;
 
-CC64_ARM_THRESH  = 10;  // arm fast — pedal barely pressed
-CC64_KILL_THRESH = 5;   // kill just above zero — safe for analog pedals
-cc64_val         = 0;
-cc64_armed       = 0;
+CC64_ARM_THRESH   = 10;  // arm when pedal is barely pressed
+CC64_KILL_THRESH  = 5;   // kill just above zero — safe for analog pedals
+CC64_REARM_THRESH = 40;  // after a kill, pedal must exceed this before re-arming
+                          // prevents bounce near zero from triggering repeated kills
+cc64_val          = 0;
+cc64_armed        = 0;
+cc64_rearm_ok     = 1;   // blocked after kill, unlocked once pedal passes REARM_THRESH
+kill_fired_this_block = 0;
 
 CC64_WAVE_SIZE = 80;
 CC64_WAVE_BASE = 1000;  // 1000..1079
@@ -68,9 +72,9 @@ function cc64_wave_push(v) local(base) (
   cc64_wave_head = (cc64_wave_head + 1) % CC64_WAVE_SIZE;
 );
 
-LOG_SIZE   = 10;
+LOG_SIZE   = 20;
 LOG_FIELDS = 5;
-LOG_BASE   = 1100;      // 1100..1149
+LOG_BASE   = 1100;      // 1100..1199
 log_head   = 0;
 log_count  = 0;
 
@@ -147,11 +151,12 @@ function kill_all_active(ts) local(n, base) (
       ACTIVE_VALID_BASE[n] = 0;
       active_count > 0 ? active_count -= 1;
     ) : ACTIVE_VALID_BASE[n] == 2 ? (
-      ACTIVE_VALID_BASE[n] = 0;  // queued note cleared by queue_clear() below
+      ACTIVE_VALID_BASE[n] = 0;  // clear stale pending-off flag so queued note fires cleanly
     );
     n += 1;
   );
-  queue_clear();
+  // queue intentionally NOT cleared: notes queued during pedal release are
+  // the user's next phrase and fire on the next beat
   cc64_kills += 1;
 );
 
@@ -197,6 +202,8 @@ tempo > 0 ? (
   );
 );
 
+kill_fired_this_block = 0;
+
 while (midirecv(offset, msg1, msg23)) (
   status = msg1 & 0xF0;
   in_ch  = msg1 & 0x0F;
@@ -224,14 +231,15 @@ while (midirecv(offset, msg1, msg23)) (
     cc64_val = vel;
     cc64_wave_push(vel);
 
-    vel >= CC64_ARM_THRESH ? (
-      cc64_armed = 1;
-    );
+    vel >= CC64_REARM_THRESH ? cc64_rearm_ok = 1;
+    vel >= CC64_ARM_THRESH && cc64_rearm_ok ? cc64_armed = 1;
 
-    vel < CC64_KILL_THRESH && cc64_armed ? (
+    vel < CC64_KILL_THRESH && cc64_armed && !kill_fired_this_block ? (
       log_push(0, status | in_ch, in_ch, 64, vel);
       kill_all_active(offset);
-      cc64_armed = 0;
+      cc64_armed    = 0;
+      cc64_rearm_ok = 0;  // block re-arm until pedal rises above REARM_THRESH
+      kill_fired_this_block = 1;
       // kill event consumed, not forwarded downstream
     ) : (
       midisend(offset, msg1, msg23);
@@ -242,7 +250,7 @@ while (midirecv(offset, msg1, msg23)) (
   );
 );
 
-@gfx 520 600
+@gfx 520 790
 gfx_clear = 0x0c0c18;
 
 function draw_box(x,y,w,h,r,g,b) (
@@ -538,3 +546,4 @@ gfx_setfont(1,"Arial",8,0);
 gfx_r=0.28;gfx_g=0.28;gfx_b=0.38;gfx_a=1;
 gfx_x=gfx_w-46;gfx_y=log_top+20;gfx_drawstr("newest");
 gfx_x=gfx_w-44;gfx_y=log_top+18+row_h*(LOG_SIZE-1);gfx_drawstr("oldest");
+
