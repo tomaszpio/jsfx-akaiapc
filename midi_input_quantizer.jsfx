@@ -13,11 +13,11 @@ about:
   Non-note messages pass through unchanged.
 
   Memory layout:
-    100..195  queue        (32 notes * 3 fields)
-    200..327  active_valid (128 note flags: 0=empty, 1=active, 2=queued_pending_off)
-    300..811  active       (128 notes * 4 fields: note, ch, pending_off, generation)
-    900..979  CC64 wave    (80 slots)
-    1000..1049 log         (10 entries * 5 fields)
+    100..195   queue        (32 notes * 3 fields)
+    200..327   active_valid (128 note flags: 0=empty, 1=active, 2=queued_pending_off)
+    400..911   active       (128 notes * 4 fields: note, ch, pending_off, generation)
+    1000..1079 CC64 wave    (80 slots)
+    1100..1149 log         (10 entries * 5 fields)
 
 slider1:0<0,16,1>Channel (0=omni)
 slider2:0<0,3,1{1/1,1/2,1/4,1/8}>Quantize grid
@@ -33,8 +33,8 @@ queue_count = 0;
 ACTIVE_VALID_BASE = 200;  // 0=empty, 1=active, 2=queued_pending_off
 memset(ACTIVE_VALID_BASE, 0, 128);
 
-ACTIVE_BASE   = 300;
-// 128 notes * 4 fields = 512 slots -> 300..811
+ACTIVE_BASE   = 400;
+// 128 notes * 4 fields = 512 slots -> 400..911
 memset(ACTIVE_BASE, 0, 128*4);
 active_count  = 0;
 
@@ -48,6 +48,8 @@ last_note_out = -1;
 last_vel_in   = 0;
 last_vel_out  = 0;
 last_ch_in    = -1;
+last_ch_out   = -1;
+subdiv        = 1.0;
 cc64_kills    = 0;
 
 CC64_ARM_THRESH  = 10;  // arm fast — pedal barely pressed
@@ -56,7 +58,7 @@ cc64_val         = 0;
 cc64_armed       = 0;
 
 CC64_WAVE_SIZE = 80;
-CC64_WAVE_BASE = 900;   // 900..979
+CC64_WAVE_BASE = 1000;  // 1000..1079
 cc64_wave_head = 0;
 memset(CC64_WAVE_BASE, 0, CC64_WAVE_SIZE);
 
@@ -68,7 +70,7 @@ function cc64_wave_push(v) local(base) (
 
 LOG_SIZE   = 10;
 LOG_FIELDS = 5;
-LOG_BASE   = 1000;      // 1000..1049
+LOG_BASE   = 1100;      // 1100..1149
 log_head   = 0;
 log_count  = 0;
 
@@ -133,6 +135,7 @@ function flush_pending_offs(ts) local(n, base) (
 );
 
 function kill_all_active(ts) local(n, base) (
+  pedal_generation += 1;  // increment first — notes added after this point are safe
   n = 0;
   loop(128,
     base = ACTIVE_BASE + n * 4;
@@ -150,7 +153,6 @@ function kill_all_active(ts) local(n, base) (
   );
   queue_clear();
   cc64_kills += 1;
-  pedal_generation += 1;  // new notes added after this are safe
 );
 
 function flush_queue(ts) local(i, base, anote, avel, ach, pre_off, abase) (
@@ -168,6 +170,7 @@ function flush_queue(ts) local(i, base, anote, avel, ach, pre_off, abase) (
     );
     last_note_out = anote;
     last_vel_out  = avel;
+    last_ch_out   = ach + 1;
     fired_count  += 1;
     i += 1;
   );
@@ -364,8 +367,10 @@ last_note_in>=0?(gfx_drawstr("#");gfx_drawnumber(last_note_in,0);):gfx_drawstr("
 gfx_setfont(1,"Arial",9,0);
 gfx_r=0.3;gfx_g=0.55;gfx_b=0.72;gfx_a=1;
 gfx_x=18;gfx_y=ny+80;gfx_drawstr("vel: ");last_note_in>=0?gfx_drawnumber(last_vel_in,0):gfx_drawstr("--");
-gfx_r=1;gfx_g=0.82;gfx_b=0.1;gfx_a=1;
-gfx_x=18;gfx_y=ny+94;gfx_drawstr("waiting for beat...");
+queue_count > 0 ? (
+  gfx_r=1;gfx_g=0.82;gfx_b=0.1;gfx_a=1;
+  gfx_x=18;gfx_y=ny+94;gfx_drawstr("waiting for beat...");
+);
 
 last_note_out>=0?(draw_box(20+pw2,ny,pw2,nh,0.04,0.22,0.08);gfx_r=0.25;gfx_g=1;gfx_b=0.45;):
                 (draw_box(20+pw2,ny,pw2,nh,0.07,0.11,0.07);gfx_r=0.2;gfx_g=0.42;gfx_b=0.26;);
@@ -373,7 +378,7 @@ gfx_a=1;gfx_setfont(1,"Arial",10,'b');
 gfx_x=28+pw2;gfx_y=ny+6;gfx_drawstr("LAST OUT");
 gfx_setfont(1,"Arial",9,0);
 gfx_r=0.28;gfx_g=0.62;gfx_b=0.34;gfx_a=1;
-gfx_x=28+pw2;gfx_y=ny+22;gfx_drawstr("ch: ");last_ch_in>0?gfx_drawnumber(last_ch_in,0):gfx_drawstr("--");
+gfx_x=28+pw2;gfx_y=ny+22;gfx_drawstr("ch: ");last_ch_out>0?gfx_drawnumber(last_ch_out,0):gfx_drawstr("--");
 gfx_setfont(1,"Arial",22,'b');
 last_note_out>=0?(gfx_r=0.22;gfx_g=1;gfx_b=0.46;):(gfx_r=0.15;gfx_g=0.35;gfx_b=0.2;);
 gfx_a=1;gfx_x=28+pw2;gfx_y=ny+34;draw_note(last_note_out);
