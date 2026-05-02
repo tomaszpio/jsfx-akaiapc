@@ -1,16 +1,33 @@
 desc: MIDI Beat Quantizer
 author: tomaszpio
-version: 1.8.0
+version: 1.9.0
 about:
-  Captures incoming MIDI notes and holds them until the next DAW beat.
-  On each beat boundary, queued Note Ons are fired.
-  Note Off is sent only when the keyboard releases the note,
-  delayed to the next beat boundary.
-  CC64 kill uses hysteresis: pedal arms at >= 10 (fast response),
-  kills when drops below 5 — safe margin for analog pedals.
-  Kill only affects notes from before the pedal release — notes played
-  while pedal is releasing are protected via generation counter.
-  Non-note messages pass through unchanged.
+  Captures incoming MIDI Note Ons and holds them until the next DAW beat
+  boundary (1/1, 1/2, 1/4 or 1/8 grid). Note Offs are also deferred to
+  the next beat, unless a CC64 kill fires first.
+
+  CC64 sustain pedal kill — hysteresis logic:
+    - Arms when pedal value rises >= 10 (fast response to press)
+    - Kills all active notes when value drops below 5 (safe analog floor)
+    - After a kill, re-arm is blocked until pedal exceeds 40, preventing
+      false kills from contact bounce during physical pedal release
+    - Dual-channel pedals (same CC64 on multiple channels in one block)
+      are deduplicated — only one kill fires per audio block
+
+  Generation counter:
+    - Incremented at the moment of kill
+    - Notes queued or played after the kill belong to the new generation
+      and are protected from being killed retroactively
+
+  Queue survival on kill:
+    - Notes queued during pedal release are NOT discarded on kill
+    - They fire on the next beat as the start of the new phrase
+    - Stale pending-off flags from the previous phrase are cleared on kill
+      so the new phrase fires with clean state (no phantom Note Offs)
+
+  20-row colour-coded MIDI event log (IN/OUT, status, channel, note, vel).
+  CC64 waveform display with arm/kill threshold markers.
+  Non-note, non-CC64 messages pass through unchanged.
 
   Memory layout:
     100..195   queue        (32 notes * 3 fields)
@@ -282,7 +299,7 @@ draw_box(0,0,gfx_w,26, 0.12,0.24,0.48);
 gfx_setfont(1,"Arial",14,'b');
 gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
 gfx_x=10;gfx_y=5;
-gfx_drawstr("MIDI Beat Quantizer  v1.6");
+gfx_drawstr("MIDI Beat Quantizer  v1.9.0");
 
 play_state?(draw_box(0,28,gfx_w,20,0.05,0.28,0.08);gfx_r=0.3;gfx_g=1;gfx_b=0.42;):
            (draw_box(0,28,gfx_w,20,0.22,0.06,0.06);gfx_r=0.9;gfx_g=0.3;gfx_b=0.3;);
