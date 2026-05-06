@@ -1,0 +1,202 @@
+desc: TP: MIDI CC Mapper (1 Source to 4 Targets)
+author: tomaszpio
+version: 1.2.0
+//tags: MIDI processing routing
+about:
+  Routes one incoming CC number to up to 4 independently configured
+  target CCs, each with its own CC number and on/off toggle.
+
+  Source CC and MIDI channel (or Omni) are set via sliders.
+  All other MIDI messages pass through unchanged.
+
+  GFX panel shows:
+    - Source CC, channel filter, last received value meter
+    - Per-target rows: enable badge, name, target CC#, live value bar
+
+// === Global Controls ===
+slider1:1<0,127,1>Source CC Number
+slider2:0<0,15,1>MIDI Channel (0=Omni)
+
+// === Target CCs + Enables ===
+slider3:1<0,127,1>Mapping 1 CC
+slider4:0<0,1,1{Off,On}>Mapping 1 Enable
+
+slider5:1<0,127,1>Mapping 2 CC
+slider6:0<0,1,1{Off,On}>Mapping 2 Enable
+
+slider7:1<0,127,1>Mapping 3 CC
+slider8:0<0,1,1{Off,On}>Mapping 3 Enable
+
+slider9:1<0,127,1>Mapping 4 CC
+slider10:0<0,1,1{Off,On}>Mapping 4 Enable
+
+in_pin:none
+out_pin:none
+
+@init
+CC_STATUS    = 0xB0;
+last_src_val = -1;
+last_src_ch  = -1;
+
+// last sent value per target: TGT_VAL_BASE[0..3]
+TGT_VAL_BASE = 100;  // 100..103
+memset(TGT_VAL_BASE, 0, 4);
+
+@slider
+src_cc   = slider1 | 0;
+src_chan  = (slider2 | 0) - 1;  // -1 = omni, 0..14 = ch1..15
+
+@block
+while (midirecv(offset, msg1, msg23)) (
+  status = msg1 & 0xF0;
+  in_ch  = msg1 & 0x0F;
+  msg2   = msg23 & 0xFF;
+  msg3   = (msg23 >> 8) & 0xFF;
+
+  status == CC_STATUS && msg2 == src_cc && (src_chan < 0 || in_ch == src_chan) ? (
+    last_src_val = msg3;
+    last_src_ch  = in_ch;
+
+    i = 0;
+    loop(4,
+      enable = slider(4 + i*2) | 0;
+      tgt_cc = slider(3 + i*2) | 0;
+      enable ? (
+        midisend(offset, CC_STATUS | in_ch, (msg3 << 8) | tgt_cc);
+        TGT_VAL_BASE[i] = msg3;
+      );
+      i += 1;
+    );
+
+  ) : (
+    midisend(offset, msg1, msg23);
+  );
+);
+
+@gfx 460 282
+gfx_clear = 0x0c0c18;
+
+function draw_box(x,y,w,h,r,g,b) (
+  gfx_r=r; gfx_g=g; gfx_b=b; gfx_a=1;
+  gfx_rect(x,y,w,h);
+);
+
+function draw_val_bar(x,y,w,h,val,r,g,b) (
+  draw_box(x,y,w,h, 0.06,0.06,0.12);
+  val >= 0 ? (
+    fw = ((val/127)*w) | 0;
+    gfx_r=r; gfx_g=g; gfx_b=b; gfx_a=0.85;
+    gfx_rect(x,y,fw,h);
+  );
+);
+
+function draw_tgt_name(idx) (
+  gfx_drawstr("Mapping ");
+  gfx_drawnumber(idx+1, 0);
+);
+
+// ── header ───────────────────────────────────────────────────────────────────
+draw_box(0,0,gfx_w,26, 0.1,0.18,0.38);
+gfx_setfont(1,"Arial",14,'b');
+gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
+gfx_x=10;gfx_y=5;
+gfx_drawstr("MIDI CC Mapper  v1.1");
+
+// ── source info bar ───────────────────────────────────────────────────────────
+draw_box(0,28,gfx_w,20, 0.07,0.09,0.18);
+gfx_setfont(1,"Arial",10,0);
+gfx_r=0.55;gfx_g=0.65;gfx_b=0.9;gfx_a=1;
+gfx_x=10;gfx_y=32;
+gfx_drawstr("Source CC: "); gfx_drawnumber(src_cc,0);
+gfx_drawstr("   Filter ch: ");
+src_chan < 0 ? (
+  gfx_r=0.4;gfx_g=0.9;gfx_b=0.5;gfx_a=1; gfx_drawstr("Omni");
+) : (
+  gfx_r=0.9;gfx_g=0.75;gfx_b=0.2;gfx_a=1; gfx_drawnumber(src_chan+1,0);
+);
+gfx_r=0.55;gfx_g=0.65;gfx_b=0.9;gfx_a=1;
+gfx_drawstr("   Last ch: ");
+last_src_ch >= 0 ? (gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1; gfx_drawnumber(last_src_ch+1,0);)
+                 : (gfx_r=0.35;gfx_g=0.35;gfx_b=0.5;gfx_a=1; gfx_drawstr("--"););
+
+// ── source value meter ────────────────────────────────────────────────────────
+mety=52; meth=22; metx=10; metw=gfx_w-20;
+draw_val_bar(metx,mety,metw,meth, last_src_val, 0.2,0.55,0.95);
+gfx_setfont(1,"Arial",10,'b');
+last_src_val >= 0 ? (
+  gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
+  gfx_x=metx+6;gfx_y=mety+5;
+  gfx_drawstr("Value: "); gfx_drawnumber(last_src_val,0);
+) : (
+  gfx_r=0.3;gfx_g=0.3;gfx_b=0.45;gfx_a=1;
+  gfx_x=metx+6;gfx_y=mety+5;
+  gfx_drawstr("no signal");
+);
+
+// ── targets table header ──────────────────────────────────────────────────────
+thy=80;
+lx_en=6; lx_name=44; lx_cc=170; lx_bar=208; barw=gfx_w-lx_bar-10;
+
+draw_box(0,thy,gfx_w,16, 0.07,0.07,0.18);
+gfx_setfont(1,"Arial",9,'b');
+gfx_r=0.5;gfx_g=0.6;gfx_b=1;gfx_a=1;
+gfx_x=lx_en;   gfx_y=thy+3; gfx_drawstr("ON");
+gfx_x=lx_name; gfx_y=thy+3; gfx_drawstr("TARGET");
+gfx_x=lx_cc;   gfx_y=thy+3; gfx_drawstr("CC#");
+gfx_x=lx_bar;  gfx_y=thy+3; gfx_drawstr("LAST VALUE");
+
+// ── target rows ───────────────────────────────────────────────────────────────
+row_h=34;
+i=0;
+loop(4,
+  enable = slider(4 + i*2) | 0;
+  tgt_cc = slider(3 + i*2) | 0;
+  tval   = TGT_VAL_BASE[i];
+  ry     = thy + 18 + i*row_h;
+
+  i%2==0 ? draw_box(0,ry,gfx_w,row_h-1, 0.06,0.06,0.11)
+         : draw_box(0,ry,gfx_w,row_h-1, 0.05,0.05,0.09);
+
+  gfx_setfont(1,"Arial",9,0);
+
+  // enable badge
+  enable ? (
+    draw_box(lx_en,ry+9,32,14, 0.04,0.22,0.08);
+    gfx_r=0.3;gfx_g=1;gfx_b=0.5;gfx_a=1;
+    gfx_x=lx_en+5;gfx_y=ry+11; gfx_drawstr("ON");
+  ) : (
+    draw_box(lx_en,ry+9,32,14, 0.14,0.07,0.07);
+    gfx_r=0.5;gfx_g=0.28;gfx_b=0.28;gfx_a=1;
+    gfx_x=lx_en+2;gfx_y=ry+11; gfx_drawstr("OFF");
+  );
+
+  // target name
+  enable ? (gfx_r=0.9; gfx_g=0.9; gfx_b=1;)
+         : (gfx_r=0.32; gfx_g=0.32; gfx_b=0.45;);
+  gfx_a=1; gfx_x=lx_name; gfx_y=ry+11;
+  draw_tgt_name(i);
+
+  // CC number
+  gfx_setfont(1,"Arial",11,'b');
+  enable ? (gfx_r=1;   gfx_g=0.78; gfx_b=0.2;)
+         : (gfx_r=0.3; gfx_g=0.26; gfx_b=0.18;);
+  gfx_a=1; gfx_x=lx_cc; gfx_y=ry+9;
+  gfx_drawnumber(tgt_cc,0);
+
+  // value bar
+  enable ? (
+    draw_val_bar(lx_bar,ry+8,barw,16, last_src_val>=0?tval:-1, 0.18,0.5,0.9);
+    gfx_setfont(1,"Arial",8,0);
+    gfx_r=1;gfx_g=1;gfx_b=1;gfx_a=1;
+    gfx_x=lx_bar+4;gfx_y=ry+11;
+    last_src_val>=0 ? gfx_drawnumber(tval,0) : gfx_drawstr("-");
+  ) : (
+    draw_box(lx_bar,ry+8,barw,16, 0.06,0.06,0.1);
+    gfx_setfont(1,"Arial",8,0);
+    gfx_r=0.22;gfx_g=0.22;gfx_b=0.3;gfx_a=1;
+    gfx_x=lx_bar+4;gfx_y=ry+11;
+    gfx_drawstr("disabled");
+  );
+
+  i+=1;
+);
